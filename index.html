@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Common Room</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <nav>
+      <h1>Common Room</h1>
+      <div class="tabs" id="tabs"></div>
+      <div class="voice">
+        <b>🔊 Voice</b>
+        <div class="row"><button id="vjoin" type="button">Join</button><button id="vmute" type="button" hidden>Mute</button></div>
+        <div id="vlist"></div>
+      </div>
+      <div class="who">
+        <span id="online">0 here</span>
+        <select id="role"><option>Dev</option><option>Modeler</option><option>Tester</option><option>Other</option></select>
+        <button id="rename" type="button">You: <b id="me"></b></button>
+      </div>
+    </nav>
+
+    <section class="center" id="chatView">
+      <div id="games" hidden>
+        <div class="gbar">
+          <button data-new="ttt" type="button">+ Tic-Tac-Toe</button>
+          <button data-new="c4" type="button">+ Connect 4</button>
+          <button data-new="rps" type="button">+ Rock Paper Scissors</button>
+        </div>
+        <div id="gamelist"></div>
+      </div>
+      <main id="feed" aria-live="polite"></main>
+      <div id="error" class="error" hidden></div>
+      <div id="picked" class="picked" hidden><span id="pickedName"></span><button id="clearFile" type="button">Remove</button></div>
+      <form id="composer">
+        <label class="attach">Attach<input type="file" id="file" hidden></label>
+        <input id="text" type="text" placeholder="Write a message" maxlength="2000" autocomplete="off">
+        <button type="submit" id="send">Send</button>
+      </form>
+    </section>
+
+    <section class="center" id="wsView" hidden>
+      <div class="wsbar">
+        <button data-wst="files" class="on" type="button">Files</button>
+        <button data-wst="tasks" type="button">Tasks &amp; bugs</button>
+      </div>
+      <div id="wsFiles" class="wsbody">
+        <aside class="flist">
+          <div class="row"><button id="newFile" type="button">+ New</button><label class="attach">⬆ Upload<input type="file" id="assetFile" hidden></label></div>
+          <div id="filelist"></div>
+        </aside>
+        <div class="editorwrap">
+          <div id="banner" class="banner" hidden></div>
+          <div id="editor"><p class="empty">Pick a file, create one, or upload scripts / models / textures.</p></div>
+        </div>
+      </div>
+      <div id="wsTasks" class="wsbody" hidden>
+        <form id="taskForm" class="row">
+          <input id="taskTitle" type="text" placeholder="Report a bug or add a task" maxlength="120">
+          <select id="taskType"><option>Bug</option><option>Task</option><option>Asset</option></select>
+          <button type="submit">Add</button>
+        </form>
+        <div class="cols" id="cols"></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="audios" hidden></div>
+  <div id="blocked" class="blocked" hidden>
+    <div>
+      <h2>Someone's already here from your network</h2>
+      <p>This room allows one person per IP address to keep bots out. Close the other tab or device, wait a few seconds, then refresh.</p>
+    </div>
+  </div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="crdt.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

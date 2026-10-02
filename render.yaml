@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: common-room
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    # For messages/files that survive restarts, upgrade to a paid plan,
+    # uncomment the lines below, and set DATA_DIR to the mount path.
+    # envVars:
+    #   - key: DATA_DIR
+    #     value: /var/data
+    # disk:
+    #   name: chat-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
