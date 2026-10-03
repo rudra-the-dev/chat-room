@@ -12,7 +12,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'messages.json');
 const WS_FILE = path.join(DATA_DIR, 'workspace.json');
-const MAX_FILE_MB = 10, MAX_MESSAGES = 300, MAX_TEXT = 200 * 1024, MAX_FILES = 100;
+const MAX_FILE_MB = 10, MAX_MESSAGES = 300, MAX_FILES = 100;
 const CHANNELS = ['general', 'games', 'random', 'dev'];
 const ROLES = ['Dev', 'Modeler', 'Tester', 'Other'];
 const TEXT_EXT = /\.(txt|md|json|js|ts|py|gd|cs|cpp|h|lua|glsl|gdshader|tscn|tres|cfg|ini|ya?ml|xml|html|css|csv)$/i;
@@ -51,10 +51,10 @@ const upload = multer({
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { maxHttpBufferSize: 100e6 });
 app.set('trust proxy', 1);
 
-// Everything lives in the root folder, so only serve these three files (never server.js / data).
+// Everything lives in the root folder, so only serve these files (never server.js / data).
 app.get(['/', '/index.html'], (q, r) => r.sendFile(path.join(__dirname, 'index.html')));
 app.get('/app.js', (q, r) => r.sendFile(path.join(__dirname, 'app.js')));
 app.get('/crdt.js', (q, r) => r.sendFile(path.join(__dirname, 'crdt.js')));
@@ -136,6 +136,8 @@ function leaveDoc(s) {
   const name = s.data.editing;
   if (!name) return;
   s.data.editing = null;
+  s.to(roomOf(name)).emit('doc:gone', s.id);
+  s.data.cur = null;
   s.leave(roomOf(name));
   const r = io.sockets.adapter.rooms.get(roomOf(name));
   if (!r || !r.size) { flush(name); docs.delete(name); }
@@ -161,7 +163,7 @@ app.post('/api/asset', guarded((req, res, s, now, drop) => {
   if (!req.file) return res.status(400).json({ error: 'No file.' });
   const name = validName(req.body.name) ? req.body.name : req.file.originalname.replace(/[^\w\-. ]/g, '_').slice(0, 60);
   if (!ws.files[name] && Object.keys(ws.files).length >= MAX_FILES) { drop(); return res.status(400).json({ error: 'Workspace is full.' }); }
-  if (TEXT_EXT.test(name) && req.file.size <= MAX_TEXT) {
+  if (TEXT_EXT.test(name)) {
     const content = fs.readFileSync(req.file.path, 'utf8');
     drop();
     commit(s, name, { content }, req.body.note);
@@ -175,9 +177,15 @@ app.post('/api/asset', guarded((req, res, s, now, drop) => {
 const ipSocket = new Map();
 io.use((s, next) => {
   const ip = ipOf(s.handshake.headers, s.handshake.address);
-  if (ipSocket.has(ip)) return next(new Error('ip-busy'));
+  const tok = String((s.handshake.auth && s.handshake.auth.tok) || '').slice(0, 32);
+  const cur = ipSocket.get(ip);
+  if (cur) {
+    const old = io.sockets.sockets.get(cur.id);
+    if (old && !(tok && tok === cur.tok)) return next(new Error('ip-busy'));  // a different browser holds this IP
+    if (old) old.disconnect(true);                                           // same browser (refresh / 2nd tab): replace the old connection
+  }
   s.data.ip = ip; s.data.name = 'Guest'; s.data.role = 'Other';
-  ipSocket.set(ip, s.id);
+  ipSocket.set(ip, { id: s.id, tok });
   next();
 });
 
@@ -303,7 +311,13 @@ io.on('connection', (s) => {
     if (!f) return done(cb, { error: 'missing' });
     leaveDoc(s);
     const res = { kind: f.kind, v: f.v, url: f.url, size: f.size, history: hist(f) };
-    if (f.kind === 'text') { s.data.editing = name; s.join(roomOf(name)); res.runs = getDoc(name).doc.dump(); }
+    if (f.kind === 'text') { s.data.editing = name; s.join(roomOf(name)); res.runs = getDoc(name).doc.dump();
+      res.cursors = [];
+      for (const id of io.sockets.adapter.rooms.get(roomOf(name)) || []) {
+        const o = io.sockets.sockets.get(id);
+        if (o && o !== s && o.data.cur) res.cursors.push({ id, user: o.data.name, a: o.data.cur.a, b: o.data.cur.b });
+      }
+    }
     pushFiles();
     done(cb, res);
   });
@@ -315,21 +329,25 @@ io.on('connection', (s) => {
     done(cb, { ok: true });
   });
   on('doc:ops', (p) => {
-    if (p.name !== s.data.editing || !Array.isArray(p.ops) || p.ops.length > 50) return;
+    if (p.name !== s.data.editing || !Array.isArray(p.ops) || p.ops.length > 100000) return;
     const d = getDoc(p.name), applied = [];
     for (const op of p.ops) if (d.doc.apply(op)) applied.push(op);
     if (!applied.length) return;
     s.to(roomOf(p.name)).emit('doc:ops', { name: p.name, ops: applied });
     clearTimeout(d.timer);
     d.timer = setTimeout(() => flush(p.name), 1500);
-    if (d.doc.map.size > 300000) { flush(p.name); resetDoc(p.name); } // compact tombstones
+  });
+  on('doc:cursor', (p) => {
+    const ok = (k) => typeof k === 'string' && (k === '' || /^\d{1,9}\.[a-z0-9]{1,8}$/.test(k));
+    if (p.name !== s.data.editing || !ok(p.a) || !ok(p.b)) return;
+    s.data.cur = { a: p.a, b: p.b };
+    s.to(roomOf(p.name)).emit('doc:cursor', { id: s.id, user: s.data.name, a: p.a, b: p.b });
   });
   on('ws:save', (p, cb) => { // "save version" snapshot of the live doc
     const f = ws.files[p.name];
     if (!f || f.kind !== 'text') return done(cb, { error: 'Cannot save.' });
     const d = docs.get(p.name);
     const content = d ? d.doc.text() : f.content;
-    if (content.length > MAX_TEXT) return done(cb, { error: 'File is over 200 KB.' });
     done(cb, { ok: true, v: commit(s, p.name, { content }, p.note, true) });
   });
   on('ws:restore', (p, cb) => {
@@ -366,7 +384,7 @@ io.on('connection', (s) => {
   on('task:del', (id) => { ws.tasks = ws.tasks.filter((t) => t.id !== id); saveWs(); pushTasks(); });
 
   s.on('disconnect', () => {
-    if (ipSocket.get(s.data.ip) === s.id) ipSocket.delete(s.data.ip);
+    if ((ipSocket.get(s.data.ip) || {}).id === s.id) ipSocket.delete(s.data.ip);
     const hadEdit = s.data.editing, hadVoice = s.data.voice;
     leaveDoc(s); s.data.voice = false;
     leaveGames(s.id);
