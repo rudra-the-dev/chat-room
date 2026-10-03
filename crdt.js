@@ -66,7 +66,7 @@
       if (!op) return false;
       if (op.t === 'i') {
         const m = ID.exec(op.id);
-        if (!m || typeof op.s !== 'string' || !op.s.length || op.s.length > 100000 || typeof op.ref !== 'string' || (op.ref !== '' && !ID.test(op.ref))) return false;
+        if (!m || typeof op.s !== 'string' || !op.s.length || typeof op.ref !== 'string' || (op.ref !== '' && !ID.test(op.ref))) return false;
         const n0 = +m[1], c = m[2];
         let ref = op.ref;
         for (let i = 0; i < op.s.length; i++) {
@@ -75,22 +75,34 @@
         }
         return true;
       }
-      if (op.t === 'd' && Array.isArray(op.ids) && op.ids.length <= 100000) {
+      if (op.t === 'd' && Array.isArray(op.ids)) {
         for (const id of op.ids) { const nd = this.map.get(id); if (nd && nd !== this.head) nd.del = true; }
         return true;
       }
       return false;
     }
     // Local edit: at visible offset p, delete delN chars and insert ins. Applies and returns the ops to send.
+    // Big edits are split into 50k-char chunks so no single message gets huge.
     local(p, delN, ins) {
-      const ops = [], prev = this.nodeAt(p);
+      const CH = 50000, ops = [], prev = this.nodeAt(p);
       if (delN > 0) {
-        const ids = [];
-        for (let m = prev.next; m && ids.length < delN; m = m.next) if (!m.del) ids.push(m.n + '.' + m.c);
+        let ids = [];
+        for (let m = prev.next; m && delN > 0; m = m.next) {
+          if (m.del) continue;
+          ids.push(m.n + '.' + m.c); delN--;
+          if (ids.length === CH) { ops.push({ t: 'd', ids }); ids = []; }
+        }
         if (ids.length) ops.push({ t: 'd', ids });
       }
-      if (ins) ops.push({ t: 'i', id: (this.clock + 1) + '.' + this.cid, ref: prev === this.head ? '' : prev.n + '.' + prev.c, s: ins });
-      ops.forEach((o) => this.apply(o));
+      let ref = prev === this.head ? '' : prev.n + '.' + prev.c;
+      for (let i = 0; i < ins.length; i += CH) {
+        const s = ins.slice(i, i + CH), n0 = this.clock + 1;
+        const op = { t: 'i', id: n0 + '.' + this.cid, ref, s };
+        this.apply(op);
+        ops.push(op);
+        ref = (n0 + s.length - 1) + '.' + this.cid;
+      }
+      ops.forEach((o) => o.t === 'd' && this.apply(o));
       return ops;
     }
   }
