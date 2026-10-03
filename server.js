@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
 const multer = require('multer');
 const { Server } = require('socket.io');
 const Doc = require('./crdt.js');
@@ -17,20 +18,78 @@ const CHANNELS = ['general', 'games', 'random', 'dev'];
 const ROLES = ['Dev', 'Modeler', 'Tester', 'Other'];
 const TEXT_EXT = /\.(txt|md|json|js|ts|py|gd|cs|cpp|h|lua|glsl|gdshader|tscn|tres|cfg|ini|ya?ml|xml|html|css|csv)$/i;
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Storage: with MONGODB_URI set, everything (messages, workspace files, tasks, uploads) lives in MongoDB.
+// Without it, the old local-disk JSON + uploads folder is used.
+const USE_MONGO = !!process.env.MONGODB_URI;
+const TMP_DIR = USE_MONGO ? os.tmpdir() : UPLOAD_DIR;
+if (!USE_MONGO) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const load = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
 const saver = (file, get) => { let t; return () => { clearTimeout(t); t = setTimeout(() => fs.writeFile(file, JSON.stringify(get()), () => {}), 300); }; };
 
-let db = load(DB_FILE, {});
-if (Array.isArray(db)) db = { general: db };
-CHANNELS.forEach((c) => { db[c] = db[c] || []; });
-let ws = load(WS_FILE, { files: {}, tasks: [] });
-const save = saver(DB_FILE, () => db);
-const saveWs = saver(WS_FILE, () => ws);
+let db = {}, ws = { files: {}, tasks: [] }, mongo = null;
+const logErr = (what) => (e) => console.error('mongo ' + what + ':', e.message);
+const save = saver(DB_FILE, () => db);     // disk mode only
+const saveWs = saver(WS_FILE, () => ws);   // disk mode only
+
+function saveMsg(m) { if (USE_MONGO) mongo.msgs.insertOne({ _id: m.id, ...m }).catch(logErr('message')); else save(); }
+function delMsg(m) { if (USE_MONGO) mongo.msgs.deleteOne({ _id: m.id }).catch(logErr('message delete')); else save(); }
+function saveTasks() { if (USE_MONGO) mongo.meta.replaceOne({ _id: 'tasks' }, { _id: 'tasks', list: ws.tasks }, { upsert: true }).catch(logErr('tasks')); else saveWs(); }
+
+// One Mongo document per workspace file (text + saved versions). Mongo caps a document at 16 MB,
+// so the oldest saved versions are dropped if a file plus its history gets too big.
+const fileTimers = new Map();
+const textSize = (f) => (f.content || '').length + f.history.reduce((n, h) => n + (h.content || '').length, 0);
+function writeFile(name) {
+  const f = ws.files[name];
+  if (!f) return Promise.resolve();
+  while (textSize(f) > 5e6 && f.history.length > 1) f.history.shift();
+  return mongo.files.replaceOne({ _id: name }, { _id: name, ...f }, { upsert: true }).catch(logErr('file'));
+}
+function saveFile(name) {
+  if (!USE_MONGO) return saveWs();
+  clearTimeout(fileTimers.get(name));
+  fileTimers.set(name, setTimeout(() => { fileTimers.delete(name); writeFile(name); }, 400));
+}
+function delFile(name) {
+  if (!USE_MONGO) return saveWs();
+  clearTimeout(fileTimers.get(name)); fileTimers.delete(name);
+  mongo.files.deleteOne({ _id: name }).catch(logErr('file delete'));
+}
+
+async function init() {
+  if (USE_MONGO) {
+    const { MongoClient, GridFSBucket } = require('mongodb');
+    const client = new MongoClient(process.env.MONGODB_URI);
+    await client.connect();
+    const d = client.db(process.env.MONGODB_DB || 'commonroom');
+    mongo = { msgs: d.collection('messages'), files: d.collection('wsfiles'), meta: d.collection('meta'), bucket: new GridFSBucket(d, { bucketName: 'uploads' }) };
+    await mongo.msgs.createIndex({ ch: 1, time: 1 });
+    for (const c of CHANNELS) {
+      const rows = await mongo.msgs.find({ ch: c }).sort({ time: -1 }).limit(MAX_MESSAGES).toArray();
+      db[c] = rows.reverse().map(({ _id, ...m }) => m);
+    }
+    for (const f of await mongo.files.find().toArray()) { const { _id, ...rest } = f; ws.files[_id] = rest; }
+    const t = await mongo.meta.findOne({ _id: 'tasks' });
+    ws.tasks = t ? t.list : [];
+    console.log('Connected to MongoDB');
+  } else {
+    db = load(DB_FILE, {});
+    if (Array.isArray(db)) db = { general: db };
+    ws = load(WS_FILE, { files: {}, tasks: [] });
+  }
+  CHANNELS.forEach((c) => { db[c] = db[c] || []; });
+  ws.files = ws.files || {}; ws.tasks = ws.tasks || [];
+}
 
 const SAFE_INLINE = { image: /\.(png|jpe?g|gif|webp)$/i, video: /\.(mp4|webm)$/i, audio: /\.(mp3|ogg|wav|m4a)$/i };
 const kindOf = (f) => Object.keys(SAFE_INLINE).find((k) => SAFE_INLINE[k].test(f)) || 'file';
-const unlinkUrl = (u) => fs.unlink(path.join(UPLOAD_DIR, path.basename(u)), () => {});
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.m4a': 'audio/mp4' };
+const unlinkUrl = (u) => {
+  const name = path.basename(u);
+  if (!USE_MONGO) return fs.unlink(path.join(UPLOAD_DIR, name), () => {});
+  mongo.bucket.find({ filename: name }).next().then((f) => f && mongo.bucket.delete(f._id)).catch(logErr('upload delete'));
+};
 
 function ipOf(headers, fallback) {
   return headers['cf-connecting-ip'] || (headers['x-forwarded-for'] || '').split(',')[0].trim() || fallback || 'unknown';
@@ -40,7 +99,7 @@ const validName = (n) => typeof n === 'string' && /^[\w\-. \/]{1,60}$/.test(n) &
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
+    destination: TMP_DIR,
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10);
       cb(null, crypto.randomBytes(12).toString('hex') + ext);
@@ -54,54 +113,79 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 100e6 });
 app.set('trust proxy', 1);
 
-// Everything lives in the root folder, so only serve these files (never server.js / data).
+// Everything lives in the root folder, so only serve these three files (never server.js / data).
 app.get(['/', '/index.html'], (q, r) => r.sendFile(path.join(__dirname, 'index.html')));
 app.get('/app.js', (q, r) => r.sendFile(path.join(__dirname, 'app.js')));
 app.get('/crdt.js', (q, r) => r.sendFile(path.join(__dirname, 'crdt.js')));
 app.get('/style.css', (q, r) => r.sendFile(path.join(__dirname, 'style.css')));
-app.use('/uploads', express.static(UPLOAD_DIR, {
-  setHeaders(res, filePath) {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (kindOf(filePath) === 'file') res.setHeader('Content-Disposition', 'attachment');
-  },
-}));
+if (USE_MONGO) {
+  app.get('/uploads/:name', async (req, res) => {
+    try {
+      const f = await mongo.bucket.find({ filename: req.params.name }).next();
+      if (!f) return res.sendStatus(404);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Type', MIME[path.extname(f.filename).toLowerCase()] || 'application/octet-stream');
+      res.setHeader('Content-Length', f.length);
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      if (kindOf(f.filename) === 'file') res.setHeader('Content-Disposition', 'attachment');
+      mongo.bucket.openDownloadStream(f._id).on('error', () => res.end()).pipe(res);
+    } catch (e) { res.sendStatus(500); }
+  });
+} else {
+  app.use('/uploads', express.static(UPLOAD_DIR, {
+    setHeaders(res, filePath) {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (kindOf(filePath) === 'file') res.setHeader('Content-Disposition', 'attachment');
+    },
+  }));
+}
 app.get('/api/messages', (req, res) => res.json(db[req.query.ch] || []));
 
 const lastPost = new Map();
 setInterval(() => lastPost.clear(), 60000);
 
 // Shared guard for both upload routes: rate limit, parse, and require a live socket from the same IP.
+// keep() moves the uploaded temp file into permanent storage (GridFS in Mongo mode) and returns its URL.
 function guarded(handler) {
   return (req, res) => {
     const now = Date.now();
     const ip = ipOf(req.headers, req.ip);
     if (now - (lastPost.get(ip) || 0) < 800) return res.status(429).json({ error: 'Slow down a little.' });
     lastPost.set(ip, now);
-    upload.single('file')(req, res, (err) => {
+    upload.single('file')(req, res, async (err) => {
       const drop = () => req.file && fs.unlink(req.file.path, () => {});
+      const keep = async () => {
+        if (USE_MONGO) {
+          await new Promise((ok, bad) => fs.createReadStream(req.file.path)
+            .pipe(mongo.bucket.openUploadStream(req.file.filename)).on('finish', ok).on('error', bad));
+          drop();
+        }
+        return '/uploads/' + req.file.filename;
+      };
       try {
         if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `Files can be up to ${MAX_FILE_MB} MB.` : 'Upload failed.' });
         const s = io.sockets.sockets.get(String(req.body.sid || ''));
         if (!s || s.data.ip !== ip) { drop(); return res.status(403).json({ error: 'Not connected.' }); }
-        handler(req, res, s, now, drop);
-      } catch (e) { drop(); res.status(500).json({ error: 'Server error.' }); }
+        await handler(req, res, s, now, drop, keep);
+      } catch (e) { drop(); if (!res.headersSent) res.status(500).json({ error: 'Server error.' }); }
     });
   };
 }
 
-app.post('/api/post', guarded((req, res, s, now, drop) => {
+app.post('/api/post', guarded(async (req, res, s, now, drop, keep) => {
   const ch = String(req.body.ch);
   if (!CHANNELS.includes(ch)) { drop(); return res.status(400).json({ error: 'Unknown channel.' }); }
   const text = String(req.body.text || '').trim().slice(0, 2000);
   if (!text && !req.file) return res.status(400).json({ error: 'Write a message or attach a file.' });
   const msg = { id: crypto.randomUUID(), ch, name: s.data.name, role: s.data.role, text, time: now };
-  if (req.file) msg.file = { url: '/uploads/' + req.file.filename, name: req.file.originalname.slice(0, 120), size: req.file.size, kind: kindOf(req.file.filename) };
+  if (req.file) msg.file = { url: await keep(), name: req.file.originalname.slice(0, 120), size: req.file.size, kind: kindOf(req.file.filename) };
   db[ch].push(msg);
+  saveMsg(msg);
   while (db[ch].length > MAX_MESSAGES) {
     const old = db[ch].shift();
     if (old.file) unlinkUrl(old.file.url);
+    delMsg(old);
   }
-  save();
   io.emit('message', msg);
   res.json({ ok: true });
 }));
@@ -129,7 +213,7 @@ function getDoc(name) {
 function flush(name) {
   const d = docs.get(name), f = ws.files[name];
   if (d) clearTimeout(d.timer);
-  if (d && f && f.kind === 'text') { f.content = d.doc.text(); f.size = f.content.length; saveWs(); }
+  if (d && f && f.kind === 'text') { f.content = d.doc.text(); f.size = f.content.length; saveFile(name); }
 }
 function resetDoc(name) { docs.delete(name); io.to(roomOf(name)).emit('doc:reset', name); }
 function leaveDoc(s) {
@@ -154,12 +238,12 @@ function commit(s, name, data, note, live) {
   }
   Object.assign(f, { kind: data.url ? 'bin' : 'text', by: e.by, role: e.role, time: e.time, content: data.content, url: data.url, size: data.size != null ? data.size : (data.content || '').length });
   if (!live && docs.has(name)) resetDoc(name);
-  saveWs(); pushFiles();
+  saveFile(name); pushFiles();
   io.emit('ws:updated', { name, v: f.v, by: e.by });
   return f.v;
 }
 
-app.post('/api/asset', guarded((req, res, s, now, drop) => {
+app.post('/api/asset', guarded(async (req, res, s, now, drop, keep) => {
   if (!req.file) return res.status(400).json({ error: 'No file.' });
   const name = validName(req.body.name) ? req.body.name : req.file.originalname.replace(/[^\w\-. ]/g, '_').slice(0, 60);
   if (!ws.files[name] && Object.keys(ws.files).length >= MAX_FILES) { drop(); return res.status(400).json({ error: 'Workspace is full.' }); }
@@ -168,7 +252,7 @@ app.post('/api/asset', guarded((req, res, s, now, drop) => {
     drop();
     commit(s, name, { content }, req.body.note);
   } else {
-    commit(s, name, { url: '/uploads/' + req.file.filename, size: req.file.size }, req.body.note);
+    commit(s, name, { url: await keep(), size: req.file.size }, req.body.note);
   }
   res.json({ ok: true });
 }));
@@ -220,6 +304,7 @@ const inGame = (sid) => [...games.values()].some((g) => g.host.sid === sid || (g
 const voiceList = () => [...io.sockets.sockets.values()].filter((x) => x.data.voice).map((x) => ({ id: x.id, name: x.data.name }));
 const pushVoice = () => io.emit('voice:list', voiceList());
 const done = (cb, o) => typeof cb === 'function' && cb(o);
+
 
 io.on('connection', (s) => {
   const on = (ev, fn) => s.on(ev, (...a) => { try { fn(...a); } catch (e) { console.error(ev, e.message); } });
@@ -362,7 +447,7 @@ io.on('connection', (s) => {
     f.history.forEach((h) => h.url && unlinkUrl(h.url));
     io.to(roomOf(name)).emit('doc:reset', name);
     docs.delete(name);
-    delete ws.files[name]; saveWs(); pushFiles();
+    delete ws.files[name]; delFile(name); pushFiles();
   });
 
   // tasks / bug board
@@ -371,17 +456,17 @@ io.on('connection', (s) => {
     const title = String(p.title || '').trim().slice(0, 120);
     if (!title || ws.tasks.length >= 300) return;
     ws.tasks.push({ id: crypto.randomUUID(), title, type: ['Bug', 'Task', 'Asset'].includes(p.type) ? p.type : 'Task', status: 'todo', by: s.data.name, assignee: null });
-    saveWs(); pushTasks();
+    saveTasks(); pushTasks();
   });
   on('task:move', (p) => {
     const t = task(p.id);
     if (!t || !['todo', 'doing', 'done'].includes(p.status)) return;
     t.status = p.status;
     if (p.status === 'doing' && !t.assignee) t.assignee = s.data.name;
-    saveWs(); pushTasks();
+    saveTasks(); pushTasks();
   });
-  on('task:claim', (id) => { const t = task(id); if (t) { t.assignee = t.assignee === s.data.name ? null : s.data.name; saveWs(); pushTasks(); } });
-  on('task:del', (id) => { ws.tasks = ws.tasks.filter((t) => t.id !== id); saveWs(); pushTasks(); });
+  on('task:claim', (id) => { const t = task(id); if (t) { t.assignee = t.assignee === s.data.name ? null : s.data.name; saveTasks(); pushTasks(); } });
+  on('task:del', (id) => { ws.tasks = ws.tasks.filter((t) => t.id !== id); saveTasks(); pushTasks(); });
 
   s.on('disconnect', () => {
     if ((ipSocket.get(s.data.ip) || {}).id === s.id) ipSocket.delete(s.data.ip);
@@ -395,4 +480,24 @@ io.on('connection', (s) => {
   });
 });
 
-server.listen(PORT, () => console.log('Common Room running on port ' + PORT));
+let closing = false;
+async function shutdown() {
+  if (closing) return;
+  closing = true;
+  for (const name of [...docs.keys()]) flush(name);   // write out live edits before the process dies
+  if (USE_MONGO) {
+    const names = [...fileTimers.keys()];
+    names.forEach((n) => clearTimeout(fileTimers.get(n)));
+    fileTimers.clear();
+    await Promise.all(names.map(writeFile));
+  } else {
+    try { fs.writeFileSync(DB_FILE, JSON.stringify(db)); fs.writeFileSync(WS_FILE, JSON.stringify(ws)); } catch {}
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+init()
+  .then(() => server.listen(PORT, () => console.log('Common Room running on port ' + PORT + (USE_MONGO ? ' (MongoDB)' : ' (local disk)'))))
+  .catch((e) => { console.error('Startup failed:', e.message); process.exit(1); });
