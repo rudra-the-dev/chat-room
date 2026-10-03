@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
+const zlib = require('zlib');
 const multer = require('multer');
 const { Server } = require('socket.io');
 const Doc = require('./crdt.js');
@@ -14,6 +15,8 @@ const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'messages.json');
 const WS_FILE = path.join(DATA_DIR, 'workspace.json');
 const MAX_FILE_MB = 10, MAX_MESSAGES = 300, MAX_FILES = 100;
+const MAX_BUILD_MB = Number(process.env.MAX_BUILD_MB) || 100;
+const BUILD_DIR = path.join(DATA_DIR, 'builds');
 const CHANNELS = ['general', 'games', 'random', 'dev'];
 const ROLES = ['Dev', 'Modeler', 'Tester', 'Other'];
 const TEXT_EXT = /\.(txt|md|json|js|ts|py|gd|cs|cpp|h|lua|glsl|gdshader|tscn|tres|cfg|ini|ya?ml|xml|html|css|csv)$/i;
@@ -22,11 +25,11 @@ const TEXT_EXT = /\.(txt|md|json|js|ts|py|gd|cs|cpp|h|lua|glsl|gdshader|tscn|tre
 // Without it, the old local-disk JSON + uploads folder is used.
 const USE_MONGO = !!process.env.MONGODB_URI;
 const TMP_DIR = USE_MONGO ? os.tmpdir() : UPLOAD_DIR;
-if (!USE_MONGO) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!USE_MONGO) { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); fs.mkdirSync(BUILD_DIR, { recursive: true }); }
 const load = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
 const saver = (file, get) => { let t; return () => { clearTimeout(t); t = setTimeout(() => fs.writeFile(file, JSON.stringify(get()), () => {}), 300); }; };
 
-let db = {}, ws = { files: {}, tasks: [] }, mongo = null;
+let db = {}, ws = { files: {}, tasks: [], builds: [] }, mongo = null;
 const logErr = (what) => (e) => console.error('mongo ' + what + ':', e.message);
 const save = saver(DB_FILE, () => db);     // disk mode only
 const saveWs = saver(WS_FILE, () => ws);   // disk mode only
@@ -34,6 +37,14 @@ const saveWs = saver(WS_FILE, () => ws);   // disk mode only
 function saveMsg(m) { if (USE_MONGO) mongo.msgs.insertOne({ _id: m.id, ...m }).catch(logErr('message')); else save(); }
 function delMsg(m) { if (USE_MONGO) mongo.msgs.deleteOne({ _id: m.id }).catch(logErr('message delete')); else save(); }
 function saveTasks() { if (USE_MONGO) mongo.meta.replaceOne({ _id: 'tasks' }, { _id: 'tasks', list: ws.tasks }, { upsert: true }).catch(logErr('tasks')); else saveWs(); }
+
+function saveBuilds() { if (USE_MONGO) mongo.meta.replaceOne({ _id: 'builds' }, { _id: 'builds', list: ws.builds }, { upsert: true }).catch(logErr('builds')); else saveWs(); }
+function postSystem(ch, text) {   // message from the "Common Room" bot
+  const msg = { id: crypto.randomUUID(), ch, name: 'Common Room', role: 'Bot', text, time: Date.now() };
+  db[ch].push(msg); saveMsg(msg);
+  while (db[ch].length > MAX_MESSAGES) { const old = db[ch].shift(); if (old.file) unlinkUrl(old.file.url); delMsg(old); }
+  io.emit('message', msg);
+}
 
 // One Mongo document per workspace file (text + saved versions). Mongo caps a document at 16 MB,
 // so the oldest saved versions are dropped if a file plus its history gets too big.
@@ -71,6 +82,8 @@ async function init() {
     for (const f of await mongo.files.find().toArray()) { const { _id, ...rest } = f; ws.files[_id] = rest; }
     const t = await mongo.meta.findOne({ _id: 'tasks' });
     ws.tasks = t ? t.list : [];
+    const bl = await mongo.meta.findOne({ _id: 'builds' });
+    ws.builds = bl ? bl.list : [];
     console.log('Connected to MongoDB');
   } else {
     db = load(DB_FILE, {});
@@ -78,7 +91,7 @@ async function init() {
     ws = load(WS_FILE, { files: {}, tasks: [] });
   }
   CHANNELS.forEach((c) => { db[c] = db[c] || []; });
-  ws.files = ws.files || {}; ws.tasks = ws.tasks || [];
+  ws.files = ws.files || {}; ws.tasks = ws.tasks || []; ws.builds = ws.builds || [];
 }
 
 const SAFE_INLINE = { image: /\.(png|jpe?g|gif|webp)$/i, video: /\.(mp4|webm)$/i, audio: /\.(mp3|ogg|wav|m4a)$/i };
@@ -107,6 +120,80 @@ const upload = multer({
   }),
   limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 1 },
 });
+
+const uploadBuild = multer({
+  storage: multer.diskStorage({
+    destination: TMP_DIR,
+    filename: (req, file, cb) => cb(null, crypto.randomBytes(12).toString('hex') + '.zip'),
+  }),
+  limits: { fileSize: MAX_BUILD_MB * 1024 * 1024, files: 1 },
+});
+
+// ---------- playable builds (web exports uploaded as .zip) ----------
+function readZip(buf) {   // minimal zip reader (stored + deflate), no dependencies
+  let e = buf.length - 22;
+  while (e >= 0 && buf.readUInt32LE(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('That is not a valid .zip file.');
+  const count = buf.readUInt16LE(e + 10);
+  let p = buf.readUInt32LE(e + 16);
+  if (count === 0xffff || p === 0xffffffff) throw new Error('Zip64 archives are not supported.');
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error('Corrupt zip.');
+    const ent = { method: buf.readUInt16LE(p + 10), csize: buf.readUInt32LE(p + 20), usize: buf.readUInt32LE(p + 24), off: buf.readUInt32LE(p + 42) };
+    const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32);
+    ent.name = buf.toString('utf8', p + 46, p + 46 + nlen).replace(/\\/g, '/');
+    p += 46 + nlen + xlen + clen;
+    out.push(ent);
+  }
+  return out;
+}
+function zipData(buf, ent) {
+  const o = ent.off;
+  if (buf.readUInt32LE(o) !== 0x04034b50) throw new Error('Corrupt zip.');
+  const start = o + 30 + buf.readUInt16LE(o + 26) + buf.readUInt16LE(o + 28);
+  const raw = buf.subarray(start, start + ent.csize);
+  if (ent.method === 0) return raw;
+  if (ent.method === 8) return zlib.inflateRawSync(raw, { maxOutputLength: ent.usize + 1024 });
+  throw new Error('Unsupported zip compression.');
+}
+async function putBuildFile(id, rel, data) {
+  if (USE_MONGO) {
+    await new Promise((ok, bad) => { const u = mongo.bucket.openUploadStream('b/' + id + '/' + rel); u.on('finish', ok).on('error', bad); u.end(data); });
+  } else {
+    const dest = path.join(BUILD_DIR, id, rel);
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.writeFile(dest, data);
+  }
+}
+async function deleteBuild(b) {
+  try {
+    if (USE_MONGO) {
+      const rows = await mongo.bucket.find({ filename: { $regex: '^b/' + b.id + '/' } }).toArray();
+      for (const f of rows) await mongo.bucket.delete(f._id);
+    } else await fs.promises.rm(path.join(BUILD_DIR, b.id), { recursive: true, force: true });
+  } catch (e) { console.error('delete build:', e.message); }
+}
+async function importBuild(zipPath, label, s) {
+  const buf = await fs.promises.readFile(zipPath);
+  let ents = readZip(buf).filter((e) => !e.name.endsWith('/') && !e.name.startsWith('/') &&
+    !e.name.split('/').some((p) => p === '..' || p === '__MACOSX' || p === '.DS_Store'));
+  const idx = ents.filter((e) => e.name.split('/').pop() === 'index.html').sort((a, b) => a.name.split('/').length - b.name.split('/').length);
+  if (!idx.length) throw new Error('No index.html found in the zip. Zip the contents of your web export folder.');
+  const prefix = idx[0].name.slice(0, idx[0].name.length - 'index.html'.length);
+  ents = ents.filter((e) => e.name.startsWith(prefix));
+  const total = ents.reduce((n, e) => n + e.usize, 0);
+  if (ents.length > 1000 || total > 300e6) throw new Error('Build is too big (max 1000 files / 300 MB unpacked).');
+  const id = crypto.randomBytes(5).toString('hex');
+  try {
+    for (const e of ents) await putBuildFile(id, e.name.slice(prefix.length), zipData(buf, e));
+  } catch (e) { await deleteBuild({ id }); throw e; }
+  return { id, name: label, by: s.data.name, role: s.data.role, time: Date.now(), files: ents.length, size: total };
+}
+const BUILD_MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.mjs': 'application/javascript', '.css': 'text/css', '.json': 'application/json',
+  '.wasm': 'application/wasm', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.txt': 'text/plain', '.woff': 'font/woff', '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf', '.mp4': 'video/mp4', '.webm': 'video/webm' };
 
 const app = express();
 const server = http.createServer(app);
@@ -146,13 +233,13 @@ setInterval(() => lastPost.clear(), 60000);
 
 // Shared guard for both upload routes: rate limit, parse, and require a live socket from the same IP.
 // keep() moves the uploaded temp file into permanent storage (GridFS in Mongo mode) and returns its URL.
-function guarded(handler) {
+function guarded(handler, uploader = upload) {
   return (req, res) => {
     const now = Date.now();
     const ip = ipOf(req.headers, req.ip);
     if (now - (lastPost.get(ip) || 0) < 800) return res.status(429).json({ error: 'Slow down a little.' });
     lastPost.set(ip, now);
-    upload.single('file')(req, res, async (err) => {
+    uploader.single('file')(req, res, async (err) => {
       const drop = () => req.file && fs.unlink(req.file.path, () => {});
       const keep = async () => {
         if (USE_MONGO) {
@@ -163,7 +250,7 @@ function guarded(handler) {
         return '/uploads/' + req.file.filename;
       };
       try {
-        if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `Files can be up to ${MAX_FILE_MB} MB.` : 'Upload failed.' });
+        if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `Files can be up to ${uploader === upload ? MAX_FILE_MB : MAX_BUILD_MB} MB.` : 'Upload failed.' });
         const s = io.sockets.sockets.get(String(req.body.sid || ''));
         if (!s || s.data.ip !== ip) { drop(); return res.status(403).json({ error: 'Not connected.' }); }
         await handler(req, res, s, now, drop, keep);
@@ -189,6 +276,7 @@ app.post('/api/post', guarded(async (req, res, s, now, drop, keep) => {
   io.emit('message', msg);
   res.json({ ok: true });
 }));
+
 
 // ---------- workspace (shared project files + tasks) ----------
 const editing = () => {
@@ -257,6 +345,56 @@ app.post('/api/asset', guarded(async (req, res, s, now, drop, keep) => {
   res.json({ ok: true });
 }));
 
+// Play a build: /play/<id>/ serves the unzipped export. By default builds run sandboxed (opaque origin, no access to
+// this site's storage). Set BUILD_SANDBOX=0 for threaded Godot builds that need cross-origin isolation (trusted use only).
+app.get('/play/:id', (req, res) => res.redirect('/play/' + req.params.id + '/'));
+app.get('/play/:id/*', async (req, res) => {
+  try {
+    const id = req.params.id;
+    let rel = req.params[0] || 'index.html';
+    if (!/^[a-f0-9]{10}$/.test(id) || rel.split('/').includes('..')) return res.sendStatus(404);
+    if (rel.endsWith('/')) rel += 'index.html';
+    const enc = /\.gz$/.test(rel) ? 'gzip' : /\.br$/.test(rel) ? 'br' : null;
+    const type = BUILD_MIME[path.extname(enc ? rel.replace(/\.(gz|br)$/, '') : rel).toLowerCase()] || 'application/octet-stream';
+    let stream, size;
+    if (USE_MONGO) {
+      const f = await mongo.bucket.find({ filename: 'b/' + id + '/' + rel }).sort({ uploadDate: -1 }).limit(1).next();
+      if (!f) return res.sendStatus(404);
+      size = f.length; stream = mongo.bucket.openDownloadStream(f._id);
+    } else {
+      const file = path.resolve(BUILD_DIR, id, rel);
+      if (!file.startsWith(path.resolve(BUILD_DIR, id) + path.sep) || !fs.existsSync(file)) return res.sendStatus(404);
+      size = fs.statSync(file).size; stream = fs.createReadStream(file);
+    }
+    res.setHeader('Content-Type', type);
+    res.setHeader('Content-Length', size);
+    if (enc) res.setHeader('Content-Encoding', enc);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (process.env.BUILD_SANDBOX === '0') {
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    } else res.setHeader('Content-Security-Policy', 'sandbox allow-scripts allow-pointer-lock allow-popups allow-forms allow-modals allow-downloads');
+    stream.on('error', () => res.end()).pipe(res);
+  } catch (e) { res.sendStatus(500); }
+});
+
+app.post('/api/build', guarded(async (req, res, s, now, drop) => {
+  try {
+    if (!req.file) throw new Error('No file.');
+    if (!/\.zip$/i.test(req.file.originalname)) throw new Error('Upload a .zip of your web export.');
+    const label = String(req.body.name || '').trim().slice(0, 60) || req.file.originalname.replace(/\.zip$/i, '').slice(0, 60);
+    const b = await importBuild(req.file.path, label, s);
+    ws.builds.unshift(b);
+    while (ws.builds.length > 10) deleteBuild(ws.builds.pop());
+    saveBuilds(); io.emit('builds', ws.builds);
+    postSystem('dev', `🎮 ${s.data.name} uploaded a playable build "${b.name}": ${req.protocol}://${req.get('host')}/play/${b.id}/`);
+    res.json({ ok: true, id: b.id });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+  finally { drop(); }
+}, uploadBuild));
+
 // ---------- one person per IP ----------
 const ipSocket = new Map();
 io.use((s, next) => {
@@ -289,20 +427,46 @@ function c4win(b, p) {
 const pub = (g) => ({
   id: g.id, type: g.type, status: g.status, winner: g.winner,
   host: g.host.name, hostSid: g.host.sid, guest: g.guest && g.guest.name, guestSid: g.guest && g.guest.sid,
-  board: g.board, turn: g.turn, picked: Object.keys(g.picks), shown: g.shown,
+  board: g.board, turn: g.turn, picked: Object.keys(g.picks), shown: g.shown, hc: g.hc,
 });
 const pushGames = () => io.emit('games', [...games.values()].map(pub));
 const reset = (g) => {
   g.board = Array(g.type === 'c4' ? 42 : 9).fill('');
   g.turn = g.type === 'c4' ? 'R' : 'X';
   g.picks = {}; g.shown = null; g.winner = null; g.status = g.guest ? 'playing' : 'waiting';
+  if (g.type === 'hc') g.hc = { batter: Math.random() < 0.5 ? 'host' : 'guest', innings: 1, scores: { host: 0, guest: 0 }, target: null, last: null, log: [] };
 };
 const leaveGames = (sid) => { for (const [id, g] of games) if (g.host.sid === sid || (g.guest && g.guest.sid === sid)) games.delete(id); };
 const inGame = (sid) => [...games.values()].some((g) => g.host.sid === sid || (g.guest && g.guest.sid === sid));
 
+// ---------- hand cricket ----------
+// Both throw at once. Same number = batter is OUT, otherwise the batter scores their number.
+// Innings 1: batter plays until out. Innings 2: chaser must beat the target.
+const HC_VALUES = [1, 2, 3, 4, 5, 6, 10, 20];
+function hcMove(g, sid, v) {
+  if (!HC_VALUES.includes(v) || g.picks[sid] !== undefined) return;
+  g.picks[sid] = v;
+  const h = g.hc, bat = h.batter === 'host' ? g.host.sid : g.guest.sid, bowl = h.batter === 'host' ? g.guest.sid : g.host.sid;
+  if (g.picks[bat] === undefined || g.picks[bowl] === undefined) return;
+  const b = g.picks[bat], w = g.picks[bowl], out = b === w;
+  g.picks = {};
+  h.last = { bat: b, bowl: w, out };
+  h.log.unshift({ bat: b, out });
+  if (h.log.length > 8) h.log.length = 8;
+  if (!out) {
+    h.scores[h.batter] += b;
+    if (h.innings === 2 && h.scores[h.batter] > h.target) { g.winner = h.batter === 'host' ? g.host.sid : g.guest.sid; g.status = 'done'; }
+    return;
+  }
+  if (h.innings === 1) { h.target = h.scores[h.batter]; h.innings = 2; h.batter = h.batter === 'host' ? 'guest' : 'host'; return; }
+  g.status = 'done';
+  g.winner = h.scores[h.batter] === h.target ? 'draw' : (h.batter === 'host' ? g.guest.sid : g.host.sid);
+}
+
 // ---------- voice ----------
 const voiceList = () => [...io.sockets.sockets.values()].filter((x) => x.data.voice).map((x) => ({ id: x.id, name: x.data.name }));
 const pushVoice = () => io.emit('voice:list', voiceList());
+const pushUsers = () => io.emit('users', [...io.sockets.sockets.values()].map((x) => ({ name: x.data.name, role: x.data.role })));
 const done = (cb, o) => typeof cb === 'function' && cb(o);
 
 
@@ -312,18 +476,19 @@ io.on('connection', (s) => {
   s.emit('games', [...games.values()].map(pub));
   s.emit('tasks', ws.tasks);
   s.emit('voice:list', voiceList());
-  pushFiles();
+  pushFiles(); s.emit('builds', ws.builds); pushUsers();
 
   on('hello', (p) => {
     p = p || {};
     s.data.name = cleanName(p.name);
     s.data.role = ROLES.includes(p.role) ? p.role : 'Other';
     if (s.data.voice) pushVoice();
+    pushUsers();
   });
 
   // games
   on('game:create', (type) => {
-    if (!ROLES_OF[type] && type !== 'rps') return;
+    if (!ROLES_OF[type] && type !== 'rps' && type !== 'hc') return;
     if (inGame(s.id)) return;
     const g = { id: crypto.randomBytes(4).toString('hex'), type, host: { sid: s.id, name: s.data.name }, guest: null };
     reset(g); games.set(g.id, g); pushGames();
@@ -339,6 +504,7 @@ io.on('connection', (s) => {
     if (!g || g.status !== 'playing') return;
     const isHost = g.host.sid === s.id;
     if (!isHost && !(g.guest && g.guest.sid === s.id)) return;
+    if (g.type === 'hc') { hcMove(g, s.id, v); pushGames(); return; }
     if (g.type === 'rps') {
       if (!BEATS[v] || g.picks[s.id]) return;
       g.picks[s.id] = v;
@@ -450,6 +616,13 @@ io.on('connection', (s) => {
     delete ws.files[name]; delFile(name); pushFiles();
   });
 
+  on('build:del', (id) => {
+    const i = ws.builds.findIndex((b) => b.id === id);
+    if (i < 0) return;
+    deleteBuild(ws.builds.splice(i, 1)[0]);
+    saveBuilds(); io.emit('builds', ws.builds);
+  });
+
   // tasks / bug board
   const task = (id) => ws.tasks.find((t) => t.id === id);
   on('task:add', (p) => {
@@ -474,7 +647,7 @@ io.on('connection', (s) => {
     leaveDoc(s); s.data.voice = false;
     leaveGames(s.id);
     io.emit('online', ipSocket.size);
-    pushGames();
+    pushGames(); pushUsers();
     if (hadEdit) pushFiles();
     if (hadVoice) pushVoice();
   });
