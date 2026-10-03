@@ -7,6 +7,16 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <script>
+    // Shows any script error on screen so problems are easy to report.
+    window.addEventListener('error', function (e) {
+      var t = e.target && (e.target.src || e.target.href);
+      var d = document.createElement('div');
+      d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99;background:#8a2326;color:#fff;padding:8px 12px;font:12px monospace';
+      d.textContent = t ? 'Failed to load: ' + t : 'JS error: ' + e.message + ' (' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ')';
+      (document.body || document.documentElement).appendChild(d);
+    }, true);
+  </script>
   <div class="app">
     <nav>
       <h1>Common Room</h1>
@@ -18,6 +28,8 @@
       </div>
       <div class="who">
         <span id="online">0 here</span>
+        <div id="users" class="users"></div>
+        <button id="alerts" type="button">🔔 Enable alerts</button>
         <select id="role"><option>Dev</option><option>Modeler</option><option>Tester</option><option>Other</option></select>
         <button id="rename" type="button">You: <b id="me"></b></button>
       </div>
@@ -29,6 +41,7 @@
           <button data-new="ttt" type="button">+ Tic-Tac-Toe</button>
           <button data-new="c4" type="button">+ Connect 4</button>
           <button data-new="rps" type="button">+ Rock Paper Scissors</button>
+          <button data-new="hc" type="button">+ Hand Cricket</button>
         </div>
         <div id="gamelist"></div>
       </div>
@@ -46,6 +59,7 @@
       <div class="wsbar">
         <button data-wst="files" class="on" type="button">Files</button>
         <button data-wst="tasks" type="button">Tasks &amp; bugs</button>
+        <button data-wst="builds" type="button">🎮 Builds</button>
       </div>
       <div id="wsFiles" class="wsbody">
         <aside class="flist">
@@ -64,6 +78,11 @@
           <button type="submit">Add</button>
         </form>
         <div class="cols" id="cols"></div>
+      </div>
+      <div id="wsBuilds" class="wsbody" hidden>
+        <div class="row"><label class="attach">⬆ Upload build (.zip)<input type="file" id="buildFile" accept=".zip,application/zip" hidden></label><span id="buildMsg"></span></div>
+        <small>Zip your web export (Godot: Project &gt; Export &gt; Web, Unity: WebGL). index.html can be at the top or inside one folder. Max 100 MB.</small>
+        <div id="buildlist"></div>
       </div>
     </section>
   </div>
