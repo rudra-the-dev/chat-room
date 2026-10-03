@@ -38,8 +38,14 @@ socket.on('connect_error', (e) => { if (e.message === 'ip-busy') $('blocked').hi
 socket.on('online', (n) => { $('online').textContent = n + ' here'; });
 socket.on('games', (g) => { games = g; drawGames(); });
 socket.on('message', (m) => {
-  if (m.ch === ch && !$('chatView').hidden) render(m);
-  else document.querySelector(`[data-ch="${m.ch}"]`)?.classList.add('unread');
+  const viewing = m.ch === ch && !$('chatView').hidden;
+  const ping = mentionsMe(m);
+  if (viewing) render(m);
+  else { unread[m.ch] = (unread[m.ch] || 0) + 1; if (ping) pinged[m.ch] = (pinged[m.ch] || 0) + 1; updateTab(m.ch); }
+  if (m.name !== me && (!viewing || document.hidden)) {
+    hiddenCount++; document.title = '(' + hiddenCount + ') Common Room';
+    if (ping) alertPing(m);
+  }
 });
 
 // ---------- navigation ----------
@@ -50,9 +56,10 @@ socket.on('message', (m) => {
   $('tabs').appendChild(b);
 });
 function markTabs(c) {
+  unread[c] = 0; pinged[c] = 0;
   document.querySelectorAll('#tabs button').forEach((b) => {
     b.classList.toggle('on', b.dataset.ch === c);
-    if (b.dataset.ch === c) b.classList.remove('unread');
+    updateTab(b.dataset.ch);
   });
 }
 const seen = new Set();
@@ -61,7 +68,7 @@ function openChannel(c) {
   $('chatView').hidden = false; $('wsView').hidden = true;
   markTabs(c);
   $('games').hidden = c !== 'games';
-  textEl.placeholder = 'Message #' + c;
+  textEl.placeholder = 'Message #' + c + '  (@name to ping)';
   fetch('/api/messages?ch=' + c).then((r) => r.json()).then((list) => {
     if (c !== ch) return;
     if (!list.length) feed.appendChild(el('p', 'Nobody has said anything here yet.', 'empty')).id = 'empty';
@@ -89,6 +96,7 @@ function render(m) {
   $('empty')?.remove();
   const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
   const wrap = el('div', null, 'msg');
+  if (mentionsMe(m)) wrap.classList.add('mention');
   const meta = el('div', null, 'meta');
   meta.append(el('b', m.name), m.role ? el('span', m.role, 'role') : '', fmtTime(m.time));
   wrap.appendChild(meta);
@@ -133,7 +141,8 @@ form.onsubmit = async (e) => {
 
 // ---------- games ----------
 document.querySelectorAll('[data-new]').forEach((b) => { b.onclick = () => socket.emit('game:create', b.dataset.new); });
-const NAMES = { ttt: 'Tic-Tac-Toe', c4: 'Connect 4', rps: 'Rock Paper Scissors' };
+const NAMES = { ttt: 'Tic-Tac-Toe', c4: 'Connect 4', rps: 'Rock Paper Scissors', hc: 'Hand Cricket' };
+const HC = [[1, '1 finger'], [2, '2 fingers'], [3, '3 fingers'], [4, '4 fingers'], [5, 'palm · left'], [6, 'thumb only'], [10, 'palm · down'], [20, 'palm · up']];
 const RPS = { rock: '✊ Rock', paper: '✋ Paper', scissors: '✌️ Scissors' };
 
 function drawGames() {
@@ -153,7 +162,26 @@ function gameView(g) {
   const v = el('div', null, 'game'), host = g.hostSid === myId;
   v.appendChild(el('h3', `${NAMES[g.type]}: ${g.host} vs ${g.guest || '…'}`));
   let status = '';
-  if (g.type === 'rps') {
+  if (g.type === 'hc') {
+    const h = g.hc, meBat = (h.batter === 'host') === host, picked = g.picked.includes(myId);
+    const sb = el('div', null, 'sb');
+    sb.appendChild(el('div', `Innings ${h.innings}/2 · ` + (meBat ? 'you are BATTING' : 'you are BOWLING')));
+    sb.appendChild(el('div', `${g.host}: ${h.scores.host}  ·  ${g.guest || '…'}: ${h.scores.guest}`));
+    if (h.target != null) sb.appendChild(el('div', `Target ${h.target + 1} · need ${Math.max(0, h.target + 1 - h.scores[h.batter])} more`));
+    v.appendChild(sb);
+    const hrow = el('div', null, 'row hc');
+    HC.forEach(([n, cap]) => {
+      const b = btn('', () => socket.emit('game:move', { id: g.id, v: n }), g.status !== 'playing' || picked);
+      b.append(el('b', String(n)), el('small', cap));
+      hrow.appendChild(b);
+    });
+    v.appendChild(hrow);
+    if (h.last) v.appendChild(el('div', `Last ball: bat ${h.last.bat} vs bowl ${h.last.bowl} — ` + (h.last.out ? 'OUT!' : '+' + h.last.bat), 'hclast'));
+    if (h.log.length) v.appendChild(el('small', 'Recent: ' + h.log.map((x) => (x.out ? 'OUT' : x.bat)).join(' · ')));
+    status = g.status === 'waiting' ? 'Waiting for an opponent…'
+      : g.status === 'done' ? (g.winner === 'draw' ? 'Tie!' : g.winner === myId ? 'You win! 🎉' : 'You lost.')
+      : picked ? 'Waiting for them…' : (meBat ? 'Pick your shot' : 'Pick your delivery');
+  } else if (g.type === 'rps') {
     const picked = g.picked.includes(myId), row = el('div', null, 'row');
     Object.keys(RPS).forEach((k) => row.appendChild(btn(RPS[k], () => socket.emit('game:move', { id: g.id, v: k }), g.status !== 'playing' || picked)));
     v.appendChild(row);
@@ -264,6 +292,7 @@ document.querySelectorAll('[data-wst]').forEach((b) => {
     document.querySelectorAll('[data-wst]').forEach((x) => x.classList.toggle('on', x === b));
     $('wsFiles').hidden = b.dataset.wst !== 'files';
     $('wsTasks').hidden = b.dataset.wst !== 'tasks';
+    $('wsBuilds').hidden = b.dataset.wst !== 'builds';
   };
 });
 socket.on('ws:files', (f) => { files = f; drawFiles(); });
@@ -496,6 +525,114 @@ $('taskForm').onsubmit = (e) => {
   if (!title) return;
   socket.emit('task:add', { title, type: $('taskType').value });
   $('taskTitle').value = '';
+};
+
+// ---------- pings (@mentions), alerts, who's here ----------
+const unread = {}, pinged = {};
+let hiddenCount = 0, audioCtx = null;
+function updateTab(c) {
+  const b = document.querySelector(`[data-ch="${c}"]`);
+  if (!b) return;
+  b.textContent = (c === 'workspace' ? '🛠 Workspace' : '# ' + c) + (unread[c] ? ' (' + unread[c] + ')' : '');
+  b.classList.toggle('unread', !!unread[c]);
+  b.classList.toggle('ping', !!pinged[c]);
+}
+function mentionsMe(m) {   // @yourname, @everyone / @all, or @your-role (@dev, @tester, @modeler)
+  if (m.name === me || !m.text) return false;
+  const t = m.text.toLowerCase();
+  return ['everyone', 'all', me.toLowerCase(), role.toLowerCase()].some((w) => {
+    let i = t.indexOf('@' + w);
+    while (i !== -1) {
+      const after = t[i + w.length + 1];
+      if (!after || !/\w/.test(after)) return true;
+      i = t.indexOf('@' + w, i + 1);
+    }
+    return false;
+  });
+}
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = 880; g.gain.value = 0.08;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.15);
+  } catch (e) {}
+}
+function alertPing(m) {
+  beep();
+  if (navigator.vibrate) navigator.vibrate(200);
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      const n = new Notification(m.name + ' pinged you in #' + m.ch, { body: m.text.slice(0, 120), tag: 'ping' });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) {}
+  }
+}
+document.addEventListener('click', () => {
+  try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.resume) audioCtx.resume(); } catch (e) {}
+}, { once: true });
+function resetTitle() { if (!document.hidden) { hiddenCount = 0; document.title = 'Common Room'; } }
+document.addEventListener('visibilitychange', resetTitle);
+window.addEventListener('focus', resetTitle);
+const alertsBtn = $('alerts');
+if (!('Notification' in window)) alertsBtn.hidden = true;
+else {
+  const syncAlerts = () => { alertsBtn.textContent = Notification.permission === 'granted' ? '🔔 Alerts on' : '🔔 Enable alerts'; };
+  syncAlerts();
+  alertsBtn.onclick = () => { try { Notification.requestPermission().then(syncAlerts); } catch (e) {} };
+}
+socket.on('users', (list) => {
+  const box = $('users');
+  box.textContent = '';
+  list.forEach((u) => {
+    const b = el('button', u.name + (u.role ? ' · ' + u.role : ''), 'user');
+    b.type = 'button';
+    b.title = 'Tap to @mention';
+    b.onclick = () => {
+      if ($('chatView').hidden) openChannel(ch);
+      textEl.value += (textEl.value && !textEl.value.endsWith(' ') ? ' ' : '') + '@' + u.name + ' ';
+      textEl.focus();
+    };
+    box.appendChild(b);
+  });
+});
+
+// ---------- workspace: playable builds ----------
+let builds = [];
+socket.on('builds', (b) => { builds = b; drawBuilds(); });
+function drawBuilds() {
+  const box = $('buildlist');
+  box.textContent = '';
+  if (!builds.length) box.appendChild(el('p', 'No builds yet. Upload a .zip of your web export.', 'empty'));
+  builds.forEach((b, i) => {
+    const c = el('div', null, 'card');
+    c.append(el('b', (i === 0 ? '⭐ ' : '') + b.name),
+      el('small', `by ${b.by}${b.role ? ' (' + b.role + ')' : ''} · ${new Date(b.time).toLocaleString()} · ${b.files} files · ${fmtSize(b.size)}`));
+    const r = el('div', null, 'row');
+    const a = el('a', '▶ Play', 'filecard'); a.href = '/play/' + b.id + '/'; a.target = '_blank'; a.rel = 'noopener';
+    r.append(a,
+      btn('Copy link', () => { if (navigator.clipboard) navigator.clipboard.writeText(location.origin + '/play/' + b.id + '/'); }),
+      btn('Delete', () => { if (confirm('Delete build "' + b.name + '" for everyone?')) socket.emit('build:del', b.id); }));
+    c.appendChild(r);
+    box.appendChild(c);
+  });
+}
+$('buildFile').onchange = async () => {
+  const f = $('buildFile').files[0];
+  if (!f) return;
+  const name = (prompt('Name this build (e.g. v0.3 alpha)', f.name.replace(/\.zip$/i, '')) || '').trim();
+  const fd = new FormData();
+  fd.append('sid', myId || ''); fd.append('name', name);
+  fd.append('file', f);
+  $('buildFile').value = '';
+  $('buildMsg').textContent = 'Uploading and unpacking ' + f.name + '… this can take a while.';
+  try {
+    const r = await fetch('/api/build', { method: 'POST', body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Upload failed.');
+    $('buildMsg').textContent = 'Uploaded! Tap Play on the new build.';
+  } catch (e) { $('buildMsg').textContent = 'Error: ' + e.message; }
 };
 
 openChannel('general');
