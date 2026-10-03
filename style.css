@@ -63,7 +63,7 @@ button:disabled{opacity:.45;cursor:default}
 .frow span{display:block;font-size:12px;color:var(--mute)}
 .editorwrap{flex:1;display:flex;flex-direction:column;min-width:0;padding:10px 14px;overflow:auto}
 #editor h3{margin:4px 0 8px}
-#editor textarea{width:100%;height:46vh;font:13px/1.45 ui-monospace,Consolas,monospace;resize:vertical;tab-size:2;white-space:pre}
+#editor textarea{display:block;white-space:pre;overflow:auto;width:100%;height:46vh;font:13px/1.45 ui-monospace,Consolas,monospace;resize:vertical;tab-size:2;white-space:pre}
 #editor input{flex:1;min-width:140px;background:#383a40;border:0;color:var(--text);padding:9px;border-radius:6px;font:inherit}
 .banner{padding:8px 12px;border-radius:6px;margin-bottom:8px;display:flex;gap:10px;align-items:center;background:#4e5058}
 .banner.ok{background:#1a6b3c}.banner.bad{background:#8a2326}
@@ -89,3 +89,8 @@ button:disabled{opacity:.45;cursor:default}
   .flist{width:100%;max-height:30%}
   .cols{grid-template-columns:1fr}
 }
+.edwrap{position:relative}
+.curlayer{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.caret{position:absolute;width:2px}
+.sel{position:absolute}
+.flag{position:absolute;left:0;font-size:10px;line-height:13px;color:#fff;padding:0 4px;border-radius:3px;white-space:nowrap}
