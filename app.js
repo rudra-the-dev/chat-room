@@ -349,4 +349,153 @@ function diffText(a, b) {
   let p = 0; const m = Math.min(a.length, b.length);
   while (p < m && a[p] === b[p]) p++;
   let s = 0;
-  while (s < m - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s
+  while (s < m - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return { p, del: a.length - p - s, ins: b.slice(p, b.length - s) };
+}
+function setBanner(text, kind, action) {
+  const b = $('banner');
+  b.textContent = ''; b.hidden = !text;
+  b.className = 'banner ' + (kind || '');
+  if (!text) return;
+  b.appendChild(el('span', text));
+  if (action) b.appendChild(btn(action[0], action[1]));
+}
+function drawFiles() {
+  const box = $('filelist');
+  box.textContent = '';
+  if (!files.length) box.appendChild(el('p', 'No files yet. Create or upload one.', 'empty'));
+  [...files].sort((a, b) => a.name.localeCompare(b.name)).forEach((f) => {
+    const b = btn('', () => { setBanner(''); openFile(f.name); });
+    b.className = 'frow' + (cur && cur.name === f.name ? ' on' : '');
+    b.append(el('b', (f.kind === 'bin' ? '📦 ' : '📄 ') + f.name),
+      el('span', `v${f.v} · ${f.by}${f.role ? ' (' + f.role + ')' : ''}` + (f.editing.length ? ' · ✎ ' + f.editing.join(', ') : '')));
+    box.appendChild(b);
+  });
+  const cf = cur && files.find((x) => x.name === cur.name);
+  if (cf && $('editingNow')) $('editingNow').textContent = cf.editing.length ? 'Editing now: ' + cf.editing.join(', ') : '';
+}
+$('newFile').onclick = () => {
+  const name = (prompt('New file name (e.g. scripts/player.gd)') || '').trim();
+  if (!name) return;
+  socket.emit('ws:create', name, (r) => { if (r.error) setBanner(r.error, 'bad'); else openFile(name); });
+};
+$('assetFile').onchange = async () => {
+  const f = $('assetFile').files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append('sid', myId || ''); fd.append('note', 'uploaded');
+  if (uploadTarget) fd.append('name', uploadTarget);
+  fd.append('file', f);
+  uploadTarget = null; $('assetFile').value = '';
+  try {
+    const r = await fetch('/api/asset', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error((await r.json()).error || 'Upload failed.');
+    setBanner('Uploaded ' + f.name, 'ok');
+  } catch (e) { setBanner(e.message, 'bad'); }
+};
+
+function renderHist(history) {
+  const box = $('hist');
+  if (!box) return;
+  box.textContent = '';
+  box.appendChild(el('b', 'Saved versions'));
+  history.forEach((h, i) => {
+    const r = el('div');
+    r.appendChild(el('span', `v${h.v} · ${h.by}${h.role ? ' (' + h.role + ')' : ''} · ${fmtTime(h.time)}${h.note ? ' — ' + h.note : ''}`));
+    if (cur.kind === 'text' && i > 0) r.appendChild(btn('Restore', () => {
+      if (confirm('Replace the live text for everyone with v' + h.v + '?')) socket.emit('ws:restore', { name: cur.name, v: h.v }, (x) => { if (x.error) setBanner(x.error, 'bad'); });
+    }));
+    box.appendChild(r);
+  });
+}
+function refreshHist() { if (cur) socket.emit('ws:hist', cur.name, (r) => { cur.v = r.v; renderHist(r.history); }); }
+
+function openFile(name) {
+  socket.emit('ws:open', name, (res) => {
+    const ed = $('editor');
+    ed.textContent = '';
+    if (res.error) { cur = null; doc = null; ed.appendChild(el('p', 'File not found.', 'empty')); drawFiles(); return; }
+    cur = { name, kind: res.kind, v: res.v };
+    ed.appendChild(el('h3', name));
+    const who = el('div', null, 'hist'); who.id = 'editingNow'; ed.appendChild(who);
+
+    if (res.kind === 'bin') {
+      doc = null; cursors = new Map();
+      ed.appendChild(el('p', `Binary file · ${fmtSize(res.size || 0)} · v${res.v}`));
+      const row = el('div', null, 'row');
+      const a = el('a', 'Download latest', 'filecard'); a.href = res.url; a.download = name;
+      row.append(a, btn('Upload new version', () => { uploadTarget = name; $('assetFile').click(); }));
+      ed.appendChild(row);
+    } else {
+      doc = Doc.from(res.runs, Math.random().toString(36).slice(2, 8));
+      const ta = el('textarea'); ta.id = 'ta'; ta.spellcheck = false;
+      ta.value = lastText = doc.text();
+      ta.wrap = 'off';
+      ta.oninput = () => {
+        const d = diffText(lastText, ta.value);
+        lastText = ta.value;
+        const ops = doc.local(d.p, d.del, d.ins);
+        if (ops.length) socket.emit('doc:ops', { name, ops });
+        renderCursors(); sendCursor();
+      };
+      ta.onscroll = renderCursors;
+      ta.onkeyup = ta.onclick = ta.onfocus = sendCursor;
+      ta.onkeydown = (e) => {
+        if (e.key === 'Tab') { e.preventDefault(); ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input')); }
+      };
+      const wrap = el('div', null, 'edwrap'), layer = el('div', null, 'curlayer');
+      layer.id = 'curlayer';
+      wrap.append(ta, layer);
+      ed.appendChild(wrap);
+      cursors = new Map((res.cursors || []).map((c) => [c.id, c]));
+      renderCursors();
+      const note = el('input'); note.type = 'text'; note.placeholder = 'Version note (optional)'; note.maxLength = 100;
+      const row = el('div', null, 'row');
+      row.append(note, btn('💾 Save version', () => socket.emit('ws:save', { name, note: note.value }, (r) => {
+        if (r.ok) { note.value = ''; setBanner('Saved as v' + r.v, 'ok'); } else setBanner(r.error, 'bad');
+      })));
+      ed.appendChild(row);
+      ed.appendChild(el('small', 'Live: everyone with this file open edits the same text, and you can see their cursors.'));
+    }
+
+    const hist = el('div', null, 'hist'); hist.id = 'hist'; ed.appendChild(hist);
+    renderHist(res.history);
+    ed.appendChild(btn('Delete file', () => {
+      if (confirm('Delete ' + name + ' and its versions for everyone?')) { socket.emit('ws:delete', name); cur = null; doc = null; }
+    }));
+    drawFiles();
+  });
+}
+
+// ---------- workspace: tasks ----------
+socket.on('tasks', (t) => { tasks = t; drawTasks(); });
+const COLS = [['todo', 'To do'], ['doing', 'Doing'], ['done', 'Done']];
+function drawTasks() {
+  const box = $('cols');
+  box.textContent = '';
+  COLS.forEach(([st, label], ci) => {
+    const list = tasks.filter((t) => t.status === st), col = el('div', null, 'col');
+    col.appendChild(el('h4', `${label} (${list.length})`));
+    list.forEach((t) => {
+      const c = el('div', null, 'card');
+      c.append(el('span', t.type, 'tag ' + t.type), el('div', t.title),
+        el('small', 'by ' + t.by + (t.assignee ? ' · ✋ ' + t.assignee : '')));
+      const r = el('div', null, 'row');
+      if (ci > 0) r.appendChild(btn('←', () => socket.emit('task:move', { id: t.id, status: COLS[ci - 1][0] })));
+      r.appendChild(btn(t.assignee === me ? 'Drop' : 'Take', () => socket.emit('task:claim', t.id)));
+      if (ci < 2) r.appendChild(btn('→', () => socket.emit('task:move', { id: t.id, status: COLS[ci + 1][0] })));
+      r.appendChild(btn('✕', () => socket.emit('task:del', t.id)));
+      c.appendChild(r); col.appendChild(c);
+    });
+    box.appendChild(col);
+  });
+}
+$('taskForm').onsubmit = (e) => {
+  e.preventDefault();
+  const title = $('taskTitle').value.trim();
+  if (!title) return;
+  socket.emit('task:add', { title, type: $('taskType').value });
+  $('taskTitle').value = '';
+};
+
+openChannel('general');
