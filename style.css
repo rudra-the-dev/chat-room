@@ -94,3 +94,17 @@ button:disabled{opacity:.45;cursor:default}
 .caret{position:absolute;width:2px}
 .sel{position:absolute}
 .flag{position:absolute;left:0;font-size:10px;line-height:13px;color:#fff;padding:0 4px;border-radius:3px;white-space:nowrap}
+.users{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto}
+.who .user{background:none;color:var(--text);padding:3px 6px;font-size:13px}
+.who .user:hover{background:#35373c}
+.tabs button.ping{background:var(--red);color:#fff}
+.msg.mention{background:rgba(250,166,26,.12);border-left:3px solid #faa61a;padding-left:8px;border-radius:4px}
+.sb{background:#111214;border-radius:6px;padding:8px 10px;margin:6px 0;line-height:1.5}
+.row.hc{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.row.hc button{display:flex;flex-direction:column;align-items:center;padding:8px 4px;background:#383a40}
+.row.hc button b{font-size:20px}
+.row.hc button small{font-size:10px;color:var(--mute)}
+.hclast{margin:6px 0;font-weight:600}
+#wsBuilds{flex-direction:column;padding:10px 14px;overflow:auto}
+#wsBuilds .card{margin-top:10px}
+#wsBuilds .card small{display:block;margin:2px 0 6px}
