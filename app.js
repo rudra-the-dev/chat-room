@@ -141,7 +141,7 @@ form.onsubmit = async (e) => {
 
 // ---------- games ----------
 document.querySelectorAll('[data-new]').forEach((b) => { b.onclick = () => socket.emit('game:create', b.dataset.new); });
-const NAMES = { ttt: 'Tic-Tac-Toe', c4: 'Connect 4', rps: 'Rock Paper Scissors', hc: 'Hand Cricket' };
+const NAMES = { ttt: 'Tic-Tac-Toe', c4: 'Connect 4', rps: 'Rock Paper Scissors', hc: 'Hand Cricket', hf: 'Hand Football' };
 const HC = [[1, '1 finger'], [2, '2 fingers'], [3, '3 fingers'], [4, '4 fingers'], [5, 'palm · left'], [6, 'thumb only'], [10, 'palm · down'], [20, 'palm · up']];
 const RPS = { rock: '✊ Rock', paper: '✋ Paper', scissors: '✌️ Scissors' };
 
@@ -162,7 +162,9 @@ function gameView(g) {
   const v = el('div', null, 'game'), host = g.hostSid === myId;
   v.appendChild(el('h3', `${NAMES[g.type]}: ${g.host} vs ${g.guest || '…'}`));
   let status = '';
-  if (g.type === 'hc') {
+  if (g.type === 'hf') {
+    status = hfView(g, v, host);
+  } else if (g.type === 'hc') {
     const h = g.hc, meBat = (h.batter === 'host') === host, picked = g.picked.includes(myId);
     const sb = el('div', null, 'sb');
     sb.appendChild(el('div', `Innings ${h.innings}/2 · ` + (meBat ? 'you are BATTING' : 'you are BOWLING')));
@@ -210,6 +212,52 @@ function gameView(g) {
   row.appendChild(btn('Leave', () => socket.emit('game:leave')));
   v.appendChild(row);
   return v;
+}
+
+// ---------- hand football ----------
+const HF_PEN = { 'index': '☝️ Index finger', 'index+middle': '✌️ Index + middle', 'thumb': '👍 Thumb' };
+function hfView(g, v, host) {
+  const h = g.hf, mine = host ? 'host' : 'guest', nm = (x) => (x === 'host' ? g.host : g.guest) || '…';
+  const picked = g.picked.includes(myId), playing = g.status === 'playing' && h.phase === 'play';
+  const penalty = h.stage === 'pens' || (h.stage === 'main' && h.attempt === 11);
+  const send = (val) => socket.emit('game:move', { id: g.id, v: val });
+  const sb = el('div', null, 'sb');
+  const stage = h.phase === 'choose' ? 'Penalty shootout · toss'
+    : h.stage === 'main' ? `Attempt ${Math.min(h.attempt, h.max)}/${h.max}`
+    : h.stage === 'extra' ? `Extra time ${Math.min(h.attempt, h.max)}/${h.max}`
+    : `Penalty shootout · round ${h.round} (${h.pen.tries} tries each)`;
+  sb.appendChild(el('div', stage));
+  sb.appendChild(el('div', `⚽ ${g.host} ${h.score.host} – ${h.score.guest} ${g.guest || '…'}`));
+  if (h.pen && h.pen.goals) sb.appendChild(el('div', `🥅 Shootout: ${g.host} ${h.pen.goals.host} – ${h.pen.goals.guest} ${g.guest || '…'} · ${nm(h.pen.attacker)} shooting (try ${Math.min(h.pen.taken + 1, h.pen.tries)}/${h.pen.tries})`));
+  if (h.stage !== 'pens' && h.phase === 'play') sb.appendChild(el('div', penalty ? `🎯 FREE PENALTY for ${nm(h.poss)}` : `🏐 Ball: ${nm(h.poss)}`));
+  if (h.toss) sb.appendChild(el('small', `🪙 Toss for ${h.toss.why}: ${nm(h.toss.winner)} won`));
+  if (h.penHistory.length) sb.appendChild(el('small', ' · earlier rounds: ' + h.penHistory.map((r) => r.host + '–' + r.guest).join(', ')));
+  v.appendChild(sb);
+  const row = el('div', null, 'row hc');
+  if (h.phase === 'choose') {
+    if (h.toss.winner === mine) {
+      row.appendChild(btn('⚔️ Attack first', () => send('attack')));
+      row.appendChild(btn('🛡️ Defend first', () => send('defend')));
+    }
+  } else if (penalty) {
+    Object.keys(HF_PEN).forEach((k) => row.appendChild(btn(HF_PEN[k], () => send(k), !playing || picked)));
+  } else {
+    for (let n = 1; n <= 6; n++) {
+      const b = btn('', () => send(n), !playing || picked);
+      b.append(el('b', String(n)), el('small', n === 1 ? 'finger' : 'fingers'));
+      row.appendChild(b);
+    }
+  }
+  v.appendChild(row);
+  if (h.last) v.appendChild(el('div', h.last, 'hclast'));
+  if (h.log.length > 1) v.appendChild(el('small', 'Before: ' + h.log.slice(1).join('  ·  ')));
+  if (g.status === 'waiting') return 'Waiting for an opponent…';
+  if (g.status === 'done') return g.winner === myId ? 'You win! 🎉' : 'You lost.';
+  if (h.phase === 'choose') return h.toss.winner === mine ? 'You won the toss: attack or defend first?' : `${nm(h.toss.winner)} is choosing…`;
+  if (picked) return 'Waiting for them…';
+  if (h.stage === 'pens') return h.pen.attacker === mine ? 'You shoot: pick your finger(s)' : 'You keep: try to match their finger(s)';
+  if (penalty) return h.poss === mine ? 'Free penalty: pick your finger(s)' : 'Defend the penalty: try to match';
+  return 'Pick 1–6 fingers';
 }
 
 // ---------- voice (WebRTC mesh, signaling over socket.io) ----------
