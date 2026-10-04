@@ -182,6 +182,14 @@ async function importBuild(zipPath, label, s) {
   if (!idx.length) throw new Error('No index.html found in the zip. Zip the contents of your web export folder.');
   const prefix = idx[0].name.slice(0, idx[0].name.length - 'index.html'.length);
   ents = ents.filter((e) => e.name.startsWith(prefix));
+  const html = zipData(buf, idx[0]).toString('utf8');   // make sure the files index.html needs are really in the zip
+  const have = new Set(ents.map((e) => e.name.slice(prefix.length)));
+  const need = [];
+  for (const m of html.matchAll(/<script[^>]+src=["']([^"':?#]+)["']/g)) if (!m[1].startsWith('/')) need.push(m[1].replace(/^\.\//, ''));
+  const exe = /"executable"\s*:\s*"([^"]+)"/.exec(html);
+  if (exe) need.push(exe[1] + '.wasm', exe[1] + '.pck');
+  const missing = [...new Set(need)].filter((f) => !have.has(f));
+  if (missing.length) throw new Error('Your zip is missing files the build needs: ' + missing.join(', ') + '. Zip ALL files from the export folder, not only index.html.');
   const total = ents.reduce((n, e) => n + e.usize, 0);
   if (ents.length > 1000 || total > 300e6) throw new Error('Build is too big (max 1000 files / 300 MB unpacked).');
   const id = crypto.randomBytes(5).toString('hex');
@@ -277,7 +285,6 @@ app.post('/api/post', guarded(async (req, res, s, now, drop, keep) => {
   res.json({ ok: true });
 }));
 
-
 // ---------- workspace (shared project files + tasks) ----------
 const editing = () => {
   const m = {};
@@ -348,9 +355,8 @@ app.post('/api/asset', guarded(async (req, res, s, now, drop, keep) => {
 // Play a build: /play/<id>/ serves the unzipped export. By default builds run sandboxed (opaque origin, no access to
 // this site's storage). Set BUILD_SANDBOX=0 for threaded Godot builds that need cross-origin isolation (trusted use only).
 app.get('/play/:id', (req, res, next) => {
-  // Avoid a redirect loop: only redirect bare /play/<id> URLs to the canonical trailing-slash form.
-  if (req.originalUrl === '/play/' + req.params.id) return res.redirect(302, '/play/' + req.params.id + '/');
-  next();
+  if (req.path.endsWith('/')) return next();   // already has the slash: let the route below serve it (no redirect loop)
+  res.redirect('/play/' + req.params.id + '/');
 });
 app.get('/play/:id/*', async (req, res) => {
   try {
@@ -431,13 +437,14 @@ function c4win(b, p) {
 const pub = (g) => ({
   id: g.id, type: g.type, status: g.status, winner: g.winner,
   host: g.host.name, hostSid: g.host.sid, guest: g.guest && g.guest.name, guestSid: g.guest && g.guest.sid,
-  board: g.board, turn: g.turn, picked: Object.keys(g.picks), shown: g.shown, hc: g.hc,
+  board: g.board, turn: g.turn, picked: Object.keys(g.picks), shown: g.shown, hc: g.hc, hf: g.hf,
 });
 const pushGames = () => io.emit('games', [...games.values()].map(pub));
 const reset = (g) => {
   g.board = Array(g.type === 'c4' ? 42 : 9).fill('');
   g.turn = g.type === 'c4' ? 'R' : 'X';
   g.picks = {}; g.shown = null; g.winner = null; g.status = g.guest ? 'playing' : 'waiting';
+  if (g.type === 'hf') hfInit(g);
   if (g.type === 'hc') g.hc = { batter: Math.random() < 0.5 ? 'host' : 'guest', innings: 1, scores: { host: 0, guest: 0 }, target: null, last: null, log: [] };
 };
 const leaveGames = (sid) => { for (const [id, g] of games) if (g.host.sid === sid || (g.guest && g.guest.sid === sid)) games.delete(id); };
@@ -467,12 +474,94 @@ function hcMove(g, sid, v) {
   g.winner = h.scores[h.batter] === h.target ? 'draw' : (h.batter === 'host' ? g.guest.sid : g.host.sid);
 }
 
+// ---------- hand football ----------
+// Both show 1-6 fingers at once. Same number = the player with the ball scores and the ball changes sides.
+// Otherwise an even sum changes possession, an odd sum keeps it. 20 attempts; attempt 11 is a free penalty for the
+// player with the ball. Level = toss + 10 attempts extra time. Still level = toss + penalty shootout (5 tries each,
+// then repeated 3-try rounds, each with a new toss, until someone wins). Penalty: attacker and keeper each show
+// index / index+middle / thumb; if they differ it is a goal.
+const HF_PEN = ['index', 'index+middle', 'thumb'];
+const hfOther = (x) => (x === 'host' ? 'guest' : 'host');
+const hfName = (g, x) => (x === 'host' ? g.host.name : g.guest.name);
+function hfToss(g, why) {
+  const winner = Math.random() < 0.5 ? 'host' : 'guest';
+  g.hf.toss = { winner, why };
+  return winner;
+}
+function hfInit(g) {
+  g.hf = { phase: 'play', stage: 'main', attempt: 1, max: 20, score: { host: 0, guest: 0 }, poss: null, toss: null,
+    pen: null, round: 1, penHistory: [], last: '', log: [] };
+  g.hf.poss = hfToss(g, 'the ball');
+  hfSay(g, `Toss: ${hfName(g, g.hf.poss)} wins and starts with the ball.`);
+}
+function hfSay(g, text) { const h = g.hf; h.last = text; h.log.unshift(text); if (h.log.length > 6) h.log.length = 6; }
+function hfAppend(g, text) { const h = g.hf; h.last += ' ' + text; h.log[0] = h.last; }
+function hfFinish(g, side) { g.hf.phase = 'done'; g.status = 'done'; g.winner = side === 'host' ? g.host.sid : g.guest.sid; }
+function hfAdvance(g) {   // after a normal / free-penalty attempt in main time or extra time
+  const h = g.hf;
+  h.attempt++;
+  if (h.attempt <= h.max) return;
+  if (h.score.host !== h.score.guest) return hfFinish(g, h.score.host > h.score.guest ? 'host' : 'guest');
+  if (h.stage === 'main') {
+    h.stage = 'extra'; h.attempt = 1; h.max = 10;
+    h.poss = hfToss(g, 'extra time');
+    hfAppend(g, `Level at full time! Toss: ${hfName(g, h.poss)} wins and starts extra time with the ball.`);
+  } else {
+    hfToss(g, 'the shootout');
+    h.phase = 'choose'; h.pen = { tries: 5 };
+    hfAppend(g, `Still level after extra time! Toss: ${hfName(g, h.toss.winner)} wins and chooses to attack or defend first in the shootout.`);
+  }
+}
+function hfPenAdvance(g) {   // after a shootout attempt
+  const h = g.hf, p = h.pen;
+  if (p.taken < p.tries) return;
+  if (p.half === 1) { p.half = 2; p.attacker = hfOther(p.attacker); p.taken = 0; return; }
+  const f = p.first, o = hfOther(f);
+  h.penHistory.push({ host: p.goals.host, guest: p.goals.guest });
+  if (p.goals[f] !== p.goals[o]) return hfFinish(g, p.goals[f] > p.goals[o] ? f : o);
+  h.round++;
+  hfToss(g, 'the next penalty round');
+  h.phase = 'choose'; h.pen = { tries: 3 };
+  hfAppend(g, `Shootout level ${p.goals.host}-${p.goals.guest}! Toss for a 3-try round: ${hfName(g, h.toss.winner)} wins and chooses.`);
+}
+function hfMove(g, sid, v) {
+  const h = g.hf, me = sid === g.host.sid ? 'host' : 'guest';
+  if (h.phase === 'choose') {   // toss winner picks attack or defend first
+    if (me !== h.toss.winner || (v !== 'attack' && v !== 'defend')) return;
+    const first = v === 'attack' ? me : hfOther(me);
+    h.pen = { tries: h.pen.tries, half: 1, first, attacker: first, taken: 0, goals: { host: 0, guest: 0 } };
+    h.stage = 'pens'; h.phase = 'play'; g.picks = {};
+    hfSay(g, `${hfName(g, me)} chose to ${v} first, so ${hfName(g, first)} shoots first.`);
+    return;
+  }
+  if (h.phase !== 'play' || g.picks[sid] !== undefined) return;
+  const penalty = h.stage === 'pens' || (h.stage === 'main' && h.attempt === 11);
+  if (penalty ? !HF_PEN.includes(v) : !(Number.isInteger(v) && v >= 1 && v <= 6)) return;
+  g.picks[sid] = v;
+  const a = g.picks[g.host.sid], b = g.picks[g.guest.sid];
+  if (a === undefined || b === undefined) return;
+  g.picks = {};
+  const H = hfName(g, 'host'), G = hfName(g, 'guest');
+  if (!penalty) {
+    const att = h.poss, def = hfOther(att), sum = a + b;
+    if (a === b) { h.score[att]++; h.poss = def; hfSay(g, `${H} ${a} · ${G} ${b}: same number! GOAL for ${hfName(g, att)}. Ball goes to ${hfName(g, def)}.`); }
+    else if (sum % 2 === 0) { h.poss = def; hfSay(g, `${H} ${a} · ${G} ${b}: even sum (${sum}). Ball goes to ${hfName(g, def)}.`); }
+    else hfSay(g, `${H} ${a} · ${G} ${b}: odd sum (${sum}). ${hfName(g, att)} keeps the ball.`);
+    hfAdvance(g);
+    return;
+  }
+  const att = h.stage === 'pens' ? h.pen.attacker : h.poss, goal = a !== b;
+  const pa = att === 'host' ? a : b, pd = att === 'host' ? b : a;
+  hfSay(g, `Penalty: ${hfName(g, att)} showed ${pa}, ${hfName(g, hfOther(att))} showed ${pd} → ${goal ? 'GOAL!' : 'SAVED!'}`);
+  if (h.stage === 'pens') { if (goal) h.pen.goals[att]++; h.pen.taken++; hfPenAdvance(g); }
+  else { if (goal) h.score[att]++; h.poss = hfOther(att); hfAdvance(g); }
+}
+
 // ---------- voice ----------
 const voiceList = () => [...io.sockets.sockets.values()].filter((x) => x.data.voice).map((x) => ({ id: x.id, name: x.data.name }));
 const pushVoice = () => io.emit('voice:list', voiceList());
 const pushUsers = () => io.emit('users', [...io.sockets.sockets.values()].map((x) => ({ name: x.data.name, role: x.data.role })));
 const done = (cb, o) => typeof cb === 'function' && cb(o);
-
 
 io.on('connection', (s) => {
   const on = (ev, fn) => s.on(ev, (...a) => { try { fn(...a); } catch (e) { console.error(ev, e.message); } });
@@ -492,7 +581,7 @@ io.on('connection', (s) => {
 
   // games
   on('game:create', (type) => {
-    if (!ROLES_OF[type] && type !== 'rps' && type !== 'hc') return;
+    if (!ROLES_OF[type] && type !== 'rps' && type !== 'hc' && type !== 'hf') return;
     if (inGame(s.id)) return;
     const g = { id: crypto.randomBytes(4).toString('hex'), type, host: { sid: s.id, name: s.data.name }, guest: null };
     reset(g); games.set(g.id, g); pushGames();
@@ -509,6 +598,7 @@ io.on('connection', (s) => {
     const isHost = g.host.sid === s.id;
     if (!isHost && !(g.guest && g.guest.sid === s.id)) return;
     if (g.type === 'hc') { hcMove(g, s.id, v); pushGames(); return; }
+    if (g.type === 'hf') { hfMove(g, s.id, v); pushGames(); return; }
     if (g.type === 'rps') {
       if (!BEATS[v] || g.picks[s.id]) return;
       g.picks[s.id] = v;
