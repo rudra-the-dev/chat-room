@@ -164,6 +164,8 @@ function gameView(g) {
   let status = '';
   if (g.type === 'hf') {
     status = hfView(g, v, host);
+  } else if (g.type === 'hc' && !g.hc) {
+    status = 'Waiting for an opponent… (the toss happens when they join)';
   } else if (g.type === 'hc') {
     const h = g.hc, meBat = (h.batter === 'host') === host, picked = g.picked.includes(myId);
     const sb = el('div', null, 'sb');
@@ -217,6 +219,7 @@ function gameView(g) {
 // ---------- hand football ----------
 const HF_PEN = { 'index': '☝️ Index finger', 'index+middle': '✌️ Index + middle', 'thumb': '👍 Thumb' };
 function hfView(g, v, host) {
+  if (!g.hf) return 'Waiting for an opponent… (the toss happens when they join)';
   const h = g.hf, mine = host ? 'host' : 'guest', nm = (x) => (x === 'host' ? g.host : g.guest) || '…';
   const picked = g.picked.includes(myId), playing = g.status === 'playing' && h.phase === 'play';
   const penalty = h.stage === 'pens' || (h.stage === 'main' && h.attempt === 11);
