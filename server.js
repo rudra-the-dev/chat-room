@@ -444,8 +444,9 @@ const reset = (g) => {
   g.board = Array(g.type === 'c4' ? 42 : 9).fill('');
   g.turn = g.type === 'c4' ? 'R' : 'X';
   g.picks = {}; g.shown = null; g.winner = null; g.status = g.guest ? 'playing' : 'waiting';
-  if (g.type === 'hf') hfInit(g);
-  if (g.type === 'hc') g.hc = { batter: Math.random() < 0.5 ? 'host' : 'guest', innings: 1, scores: { host: 0, guest: 0 }, target: null, last: null, log: [] };
+  g.hc = null; g.hf = null;   // the toss happens only once both players are in
+  if (g.guest && g.type === 'hf') hfInit(g);
+  if (g.guest && g.type === 'hc') g.hc = { batter: Math.random() < 0.5 ? 'host' : 'guest', innings: 1, scores: { host: 0, guest: 0 }, target: null, last: null, log: [] };
 };
 const leaveGames = (sid) => { for (const [id, g] of games) if (g.host.sid === sid || (g.guest && g.guest.sid === sid)) games.delete(id); };
 const inGame = (sid) => [...games.values()].some((g) => g.host.sid === sid || (g.guest && g.guest.sid === sid));
@@ -589,7 +590,9 @@ io.on('connection', (s) => {
   on('game:join', (id) => {
     const g = games.get(id);
     if (!g || g.guest || inGame(s.id)) return;
-    g.guest = { sid: s.id, name: s.data.name }; g.status = 'playing'; pushGames();
+    g.guest = { sid: s.id, name: s.data.name };
+    reset(g);   // fresh game state, and the toss happens now that both players are here
+    pushGames();
   });
   on('game:move', (p) => {
     const { id, v } = p;
