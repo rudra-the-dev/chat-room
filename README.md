@@ -1,12 +1,22 @@
 # Common Room
 
-No-login Discord-style room for a game dev crew. One person per IP (anti-bot).
+A no-login, Discord-style place for a game dev crew.
 
-- Chat: #general #games #random #dev, file attachments (10 MB), role tags (Dev / Modeler / Tester / Other)
-- Games (in #games): Tic-Tac-Toe, Connect 4, Rock Paper Scissors
-- Voice: join from the sidebar (WebRTC, peer to peer; needs HTTPS or localhost + mic permission)
-- Workspace: shared project files edited live by everyone at once (CRDT, see crdt.js), saved versions + restore, "who's editing" markers;
-  upload models, textures and scripts (versioned); tasks & bug board for testers and devs
+- Accounts without email: permanent username + changeable display name, profile (picture, status, about me) and a recovery code
+- Servers: the public lobby plus private invite-only servers (invite links with expiry / max uses, roles: owner / admin / mod / member)
+- Chat with channels, attachments, @mentions and pings, direct messages (block, DMs-off, report)
+- Moderation: delete, mute, kick, ban; reports with evidence snapshots; site-admin panel (ADMIN_KEY), audit log, review of reported servers
+- Games: Tic-Tac-Toe, Connect 4, Rock Paper Scissors, Hand Cricket, Hand Football
+- Voice (peer to peer), live co-edited workspace files with cursors, tasks and bugs board, playable web-export builds
+- Mobile-first layout with a bottom tab bar (Chats, Servers, DMs, You); the desktop layout shows everything side by side
 
-All files live in the repo root. Run: `npm install && npm start`, open http://localhost:3000
-Render: build `npm install`, start `node server.js`. Free plan wipes data on restart; add a disk and set DATA_DIR to keep it.
+All files live in the repo root.
+
+## Environment variables
+- `MONGODB_URI` (and optional `MONGODB_DB`): store everything in MongoDB (uploads in GridFS). Without it, one JSON file on local disk (`DATA_DIR`).
+- `ADMIN_KEY`: secret that makes you the site admin. Register a reserved name (like `rudra`) with it, or unlock it on the You tab.
+- `RESERVED_NAMES`: comma separated usernames nobody else can take.
+- `MAX_BUILD_MB` (default 100), `BUILD_SANDBOX=0` (trusted builds only).
+
+## Run
+`npm install && npm start`, open http://localhost:3000
