@@ -5,12 +5,10 @@ services:
     plan: free
     buildCommand: npm install
     startCommand: node server.js
-    # For messages/files that survive restarts, upgrade to a paid plan,
-    # uncomment the lines below, and set DATA_DIR to the mount path.
-    # envVars:
-    #   - key: DATA_DIR
-    #     value: /var/data
-    # disk:
-    #   name: chat-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+    envVars:
+      - key: MONGODB_URI
+        sync: false        # your MongoDB Atlas connection string
+      - key: MONGODB_DB
+        value: commonroom
+      - key: ADMIN_KEY
+        sync: false        # a long secret only you know; it makes you the site admin
