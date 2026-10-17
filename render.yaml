@@ -12,3 +12,5 @@ services:
         value: commonroom
       - key: ADMIN_KEY
         sync: false        # a long secret only you know; it makes you the site admin
+      - key: RESERVED_NAMES
+        value: admin,rudra
