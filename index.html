@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1e1f22">
   <title>Common Room</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -17,84 +18,133 @@
       (document.body || document.documentElement).appendChild(d);
     }, true);
   </script>
-  <div class="app">
-    <nav>
-      <h1>Common Room</h1>
-      <div class="tabs" id="tabs"></div>
-      <div class="voice">
-        <b>🔊 Voice</b>
-        <div class="row"><button id="vjoin" type="button">Join</button><button id="vmute" type="button" hidden>Mute</button></div>
-        <div id="vlist"></div>
+
+  <div id="app">
+    <aside id="drawerL" class="drawer left">
+      <div class="dhead"><b id="dServer">Common Room</b><button id="dSettings" class="ghost" title="Server settings">⚙</button></div>
+      <div class="dsec">Channels</div>
+      <div id="chanList"></div>
+    </aside>
+
+    <div id="main">
+      <header id="topbar">
+        <button id="tBack" class="ghost" hidden>←</button>
+        <button id="btnMenu" class="ghost" title="Channels">☰</button>
+        <div class="ttl"><b id="tMain">Common Room</b><small id="tSub"></small></div>
+        <button id="btnApps" class="ghost" title="Games, workspace, voice">＋</button>
+        <button id="btnMembers" class="ghost" title="Members">👥</button>
+      </header>
+      <div id="voicePill" hidden><span>🔊 In voice</span><button id="vpMute" type="button">Mute</button><button id="vpLeave" type="button">Leave</button></div>
+
+      <div id="views">
+        <section id="vChat" class="view">
+          <main id="feed" aria-live="polite"></main>
+          <div id="error" class="error" hidden></div>
+          <div id="picked" class="picked" hidden><span id="pickedName"></span><button id="clearFile" type="button" class="ghost">Remove</button></div>
+          <form id="composer">
+            <label class="attach" title="Attach a file">📎<input type="file" id="file" hidden></label>
+            <input id="text" type="text" placeholder="Message" maxlength="2000" autocomplete="off">
+            <button type="submit" id="send">Send</button>
+          </form>
+        </section>
+
+        <section id="vServers" class="view" hidden><div class="pad">
+          <h2>Your servers</h2><div id="srvList"></div>
+          <div class="box"><h3>Create a server</h3><div class="row"><input id="newSrvName" type="text" placeholder="Server name" maxlength="30"><button id="newSrvBtn" type="button">Create</button></div></div>
+          <div class="box"><h3>Join with an invite</h3><div class="row"><input id="joinCode" type="text" placeholder="Invite code or link" maxlength="80"><button id="joinBtn" type="button">Join</button></div></div>
+        </div></section>
+
+        <section id="vDMs" class="view" hidden>
+          <div id="dmList" class="pad"></div>
+          <div id="dmConv" hidden>
+            <div class="dmhead"><button id="dmBack" class="ghost">←</button><div id="dmWho" class="dmwho"></div><button id="dmMenu" class="ghost">⋯</button></div>
+            <div id="dmFeed"></div>
+            <form id="dmForm"><input id="dmText" type="text" placeholder="Message" maxlength="1000" autocomplete="off"><button type="submit">Send</button></form>
+          </div>
+        </section>
+
+        <section id="vYou" class="view" hidden><div id="youBox" class="pad"></div></section>
+
+        <section id="vGames" class="view" hidden><div class="pad">
+          <div class="gbar" id="gbar">
+            <button data-new="ttt" type="button">+ Tic-Tac-Toe</button>
+            <button data-new="c4" type="button">+ Connect 4</button>
+            <button data-new="rps" type="button">+ Rock Paper Scissors</button>
+            <button data-new="hc" type="button">+ Hand Cricket</button>
+            <button data-new="hf" type="button">+ Hand Football</button>
+          </div>
+          <div id="gamelist"></div>
+        </div></section>
+
+        <section id="vWork" class="view" hidden>
+          <div class="wsbar">
+            <button data-wst="files" class="on" type="button">Files</button>
+            <button data-wst="tasks" type="button">Tasks</button>
+            <button data-wst="builds" type="button">Builds</button>
+          </div>
+          <div id="wsFiles" class="wsbody">
+            <aside class="flist">
+              <div class="row"><button id="newFile" type="button">+ New</button><label class="attach">⬆ Upload<input type="file" id="assetFile" hidden></label></div>
+              <div id="filelist"></div>
+            </aside>
+            <div class="editorwrap">
+              <div id="banner" class="banner" hidden></div>
+              <div id="editor"><p class="empty">Pick a file, create one, or upload scripts, models and textures.</p></div>
+            </div>
+          </div>
+          <div id="wsTasks" class="wsbody" hidden>
+            <form id="taskForm" class="row">
+              <input id="taskTitle" type="text" placeholder="Report a bug or add a task" maxlength="120">
+              <select id="taskType"><option>Bug</option><option>Task</option><option>Asset</option></select>
+              <button type="submit">Add</button>
+            </form>
+            <div class="cols" id="cols"></div>
+          </div>
+          <div id="wsBuilds" class="wsbody" hidden>
+            <div class="row"><label class="attach">⬆ Upload build (.zip)<input type="file" id="buildFile" accept=".zip,application/zip" hidden></label><span id="buildMsg"></span></div>
+            <small>Zip all files of your web export (Godot: Project &gt; Export &gt; Web, Unity: WebGL). Max 100 MB.</small>
+            <div id="buildlist"></div>
+          </div>
+        </section>
+
+        <section id="vVoice" class="view" hidden><div class="pad">
+          <h2>Voice</h2>
+          <div class="row"><button id="vjoin" type="button">Join</button><button id="vmute" type="button" hidden>Mute</button></div>
+          <div id="vlist"></div>
+          <small>Voice is peer to peer. It needs HTTPS and microphone permission.</small>
+        </div></section>
+
+        <section id="vSettings" class="view" hidden><div id="setBox" class="pad"></div></section>
+        <section id="vAdmin" class="view" hidden><div id="admBox" class="pad"></div></section>
       </div>
-      <div class="who">
-        <span id="online">0 here</span>
-        <div id="users" class="users"></div>
-        <button id="alerts" type="button">🔔 Enable alerts</button>
-        <select id="role"><option>Dev</option><option>Modeler</option><option>Tester</option><option>Other</option></select>
-        <button id="rename" type="button">You: <b id="me"></b></button>
-      </div>
+    </div>
+
+    <aside id="drawerR" class="drawer right">
+      <div class="dhead"><b>Members</b><span id="memCount" class="muted"></span></div>
+      <div id="memList"></div>
+    </aside>
+
+    <nav id="bottomNav">
+      <button data-nav="chat" class="on"><span>💬</span><small>Chats</small><i id="bChat" hidden></i></button>
+      <button data-nav="servers"><span>🗂</span><small>Servers</small><i id="bSrv" hidden></i></button>
+      <button data-nav="dms"><span>✉️</span><small>DMs</small><i id="bDm" hidden></i></button>
+      <button data-nav="you"><span>🙂</span><small>You</small></button>
     </nav>
-
-    <section class="center" id="chatView">
-      <div id="games" hidden>
-        <div class="gbar">
-          <button data-new="ttt" type="button">+ Tic-Tac-Toe</button>
-          <button data-new="c4" type="button">+ Connect 4</button>
-          <button data-new="rps" type="button">+ Rock Paper Scissors</button>
-          <button data-new="hc" type="button">+ Hand Cricket</button>
-          <button data-new="hf" type="button">+ Hand Football</button>
-        </div>
-        <div id="gamelist"></div>
-      </div>
-      <main id="feed" aria-live="polite"></main>
-      <div id="error" class="error" hidden></div>
-      <div id="picked" class="picked" hidden><span id="pickedName"></span><button id="clearFile" type="button">Remove</button></div>
-      <form id="composer">
-        <label class="attach">Attach<input type="file" id="file" hidden></label>
-        <input id="text" type="text" placeholder="Write a message" maxlength="2000" autocomplete="off">
-        <button type="submit" id="send">Send</button>
-      </form>
-    </section>
-
-    <section class="center" id="wsView" hidden>
-      <div class="wsbar">
-        <button data-wst="files" class="on" type="button">Files</button>
-        <button data-wst="tasks" type="button">Tasks &amp; bugs</button>
-        <button data-wst="builds" type="button">🎮 Builds</button>
-      </div>
-      <div id="wsFiles" class="wsbody">
-        <aside class="flist">
-          <div class="row"><button id="newFile" type="button">+ New</button><label class="attach">⬆ Upload<input type="file" id="assetFile" hidden></label></div>
-          <div id="filelist"></div>
-        </aside>
-        <div class="editorwrap">
-          <div id="banner" class="banner" hidden></div>
-          <div id="editor"><p class="empty">Pick a file, create one, or upload scripts / models / textures.</p></div>
-        </div>
-      </div>
-      <div id="wsTasks" class="wsbody" hidden>
-        <form id="taskForm" class="row">
-          <input id="taskTitle" type="text" placeholder="Report a bug or add a task" maxlength="120">
-          <select id="taskType"><option>Bug</option><option>Task</option><option>Asset</option></select>
-          <button type="submit">Add</button>
-        </form>
-        <div class="cols" id="cols"></div>
-      </div>
-      <div id="wsBuilds" class="wsbody" hidden>
-        <div class="row"><label class="attach">⬆ Upload build (.zip)<input type="file" id="buildFile" accept=".zip,application/zip" hidden></label><span id="buildMsg"></span></div>
-        <small>Zip your web export (Godot: Project &gt; Export &gt; Web, Unity: WebGL). index.html can be at the top or inside one folder. Max 100 MB.</small>
-        <div id="buildlist"></div>
-      </div>
-    </section>
   </div>
 
+  <div id="scrim" hidden></div>
+  <div id="sheet" hidden><div id="sheetBox"></div></div>
+  <div id="toast" hidden></div>
   <div id="audios" hidden></div>
-  <div id="blocked" class="blocked" hidden>
-    <div>
+
+  <div id="setup" class="overlay" hidden><div id="setupBox" class="card2"></div></div>
+  <div id="blocked" class="overlay" hidden>
+    <div class="card2">
       <h2 id="blockedTitle">Someone's already here from your network</h2>
       <p id="blockedMsg">This room allows one person per IP address to keep bots out. Close the other tab or device, wait a few seconds, then refresh.</p>
     </div>
   </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script src="crdt.js"></script>
   <script src="app.js"></script>
