@@ -8,6 +8,7 @@
 
 const KEY = process.env.GEMINI_API_KEY || '';
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const FALLBACK = process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite';   // tried when the main model is overloaded
 const OFF = String(process.env.BOTS || '').toLowerCase() === 'off';
 const DEBUG = !!process.env.BOTS_DEBUG;
 
@@ -113,10 +114,10 @@ exports.start = function start(ctx) {
   }
 
   // ---------- Gemini ----------
-  async function gemini(system, prompt) {
+  async function callModel(model, system, prompt) {
     const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 15000);
     try {
-      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent', {
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', {
         method: 'POST', signal: ctl.signal,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
         body: JSON.stringify({
@@ -130,6 +131,19 @@ exports.start = function start(ctx) {
       const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
       return parts ? parts.map((p) => p.text || '').join('').trim() : '';
     } finally { clearTimeout(to); }
+  }
+  async function gemini(system, prompt) {
+    const models = [MODEL, FALLBACK].filter((m, i, a) => m && a.indexOf(m) === i);
+    let err;
+    for (const m of models) {
+      try { return await callModel(m, system, prompt); }
+      catch (e) {
+        err = e;
+        if (![404, 429, 500, 503].includes(e.status) && e.name !== 'AbortError') throw e;   // other errors (bad key etc.) won't be fixed by another model
+        if (DEBUG) console.log('[bots] ' + m + ' failed (' + (e.status || e.name) + '), trying next model');
+      }
+    }
+    throw err;
   }
   function onError(e) {
     console.error('[bots] gemini error:', e.message, e.body || '');
