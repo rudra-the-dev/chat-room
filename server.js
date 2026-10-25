@@ -1312,6 +1312,8 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 init()
-  .then(() => server.listen(PORT, () => console.log('Common Room running on port ' + PORT + (USE_MONGO ? ' (MongoDB)' : ' (local disk)'))))
+  .then(() => {
+    server.listen(PORT, () => console.log('Common Room running on port ' + PORT + (USE_MONGO ? ' (MongoDB)' : ' (local disk)')));
+    require('./bots').start({ io, users, byName, servers, chanMsgs, makeMsg, putUser, rate, rid, sha, now });
+  })
   .catch((e) => { console.error('Startup failed:', e.message); process.exit(1); });
-   require('./bots').start({ io, users, byName, servers, chanMsgs, makeMsg, putUser, rate, rid, sha, now });
