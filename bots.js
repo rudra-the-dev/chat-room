@@ -170,8 +170,8 @@ exports.start = function start(ctx) {
   }
   function buildPrompt(job) {
     let task;
-    if (job.kind === 'mention') task = job.who + ' (@' + job.whoUser + ') just talked to you directly. Reply to them. You may start with @' + job.whoUser + '.';
-    else if (job.kind === 'greet') task = 'A new person called ' + job.who + ' (@' + job.whoUser + ') just came online. Welcome them in your own style. You may start with @' + job.whoUser + '.';
+    if (job.kind === 'mention') task = job.who + ' (@' + job.whoUser + ') just talked to you directly. Reply to them. You may start with @' + job.whoUser + '. If you use their name, use exactly "' + job.who + '" and never invent nicknames for them.';
+    else if (job.kind === 'greet') task = 'A new person called ' + job.who + ' (@' + job.whoUser + ') just came online. Welcome them in your own style. You may start with @' + job.whoUser + '. If you use their name, use exactly "' + job.who + '" and never invent nicknames for them.';
     else if (job.kind === 'chime') task = 'Jump into the conversation naturally, reacting to the latest human message.';
     else if (job.kind === 'topic') task = 'Nobody is talking right now. Start a casual conversation. Idea: ' + job.seed + '.';
     else task = 'Continue the conversation naturally: react to the last message or add something new.';
