@@ -63,8 +63,12 @@ exports.start = function start(ctx) {
   const { io, users, byName, servers, chanMsgs, makeMsg, putUser, rate, rid, sha, now } = ctx;
   if (OFF) return console.log('[bots] disabled (BOTS=off)');
   if (!KEY) return console.log('[bots] disabled (set GEMINI_API_KEY to enable)');
+  if (!servers.get('lobby')) {   // start() ran before init() finished loading: retry for up to ~1 minute
+    ctx._tries = (ctx._tries || 0) + 1;
+    if (ctx._tries > 30) return console.log('[bots] no lobby found - call start() after init() finishes');
+    return setTimeout(() => start(ctx), 2000);
+  }
   const lobby = servers.get('lobby');
-  if (!lobby) return console.log('[bots] no lobby found');
 
   // ---------- resident accounts (real user records: no tokens, can't log in, DMs off) ----------
   const bots = BOTS.map((b) => {
