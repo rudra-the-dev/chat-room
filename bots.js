@@ -7,8 +7,8 @@
 // Env vars: GEMINI_API_KEY (required) | GEMINI_MODEL (optional) | BOTS=off (kill switch) | BOTS_DEBUG=1 (logs)
 
 const KEY = process.env.GEMINI_API_KEY || '';
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
-const FALLBACK = process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash-lite';   // tried when the main model is overloaded
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+const FALLBACK = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.1-flash-lite';   // tried when the main model is overloaded
 const OFF = String(process.env.BOTS || '').toLowerCase() === 'off';
 const DEBUG = !!process.env.BOTS_DEBUG;
 
